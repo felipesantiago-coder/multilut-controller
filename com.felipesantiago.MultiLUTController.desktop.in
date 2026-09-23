@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=MultiLUT Controller
+Comment=Gerencie perfis MultiLUT do Insurgency no vkBasalt
+Exec=@APP_DIR@/run.sh
+Icon=com.felipesantiago.MultiLUTController
+Terminal=false
+Categories=Game;Utility;GTK;
+Keywords=vkBasalt;ReShade;LUT;Insurgency;Vulkan;
+StartupNotify=true
+StartupWMClass=com.felipesantiago.MultiLUTController
