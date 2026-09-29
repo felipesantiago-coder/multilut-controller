@@ -26,6 +26,7 @@ except (ImportError, ValueError) as exc:
 
 import multilut_core as core
 import multilut_aim as aim
+import multilut_scopes as scopes
 import multilut_trainer as training
 
 
@@ -120,6 +121,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.file_monitor = None
         self._programmatic_selection = False
         self.config["crosshair"] = aim.crosshair_config_from_config(self.config)
+        self.config["scopes"] = scopes.normalize_scope_config(self.config.get("scopes"))
         self.overlay_process = None
         self.overlay_poll_id = None
         self._overlay_log_file = None
@@ -191,6 +193,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.build_overlay_page(), "overlay", "Mira na tela"
         )
         page_overlay.set_icon_name("find-location-symbolic")
+        page_scopes = self.view_stack.add_titled(
+            self.build_scopes_page(), "scopes", "Lunetas"
+        )
+        page_scopes.set_icon_name("zoom-in-symbolic")
 
         body.append(self.view_stack)
 
@@ -203,6 +209,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.refresh_game_status()
         self.refresh_progress_page()
         self.update_overlay_ui()
+        self.refresh_scopes_page()
         GLib.timeout_add_seconds(2, self.refresh_game_status)
         self.start_file_monitor()
 
@@ -700,6 +707,274 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.toast(f"Não foi possível salvar a mira: {exc}", 6)
             return GLib.SOURCE_REMOVE
         return GLib.SOURCE_REMOVE
+
+    # ------------------------------------------------------------ lunetas
+    def build_scopes_page(self) -> Gtk.Widget:
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        content.set_margin_start(26)
+        content.set_margin_end(26)
+        content.set_margin_top(24)
+        content.set_margin_bottom(24)
+
+        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        title = Gtk.Label(label="Lunetas ampliadas", xalign=0)
+        title.add_css_class("hero-title")
+        subtitle = Gtk.Label(
+            label=(
+                "Gera um theater nativo do Insurgency (scripts/theaters/multilut_zoom.theater) "
+                "que aumenta a ampliação das lunetas selecionadas — a luneta 7x pode chegar "
+                "a 12x. O mecanismo é o oficial do jogo (mp_theater_override): nenhum arquivo "
+                "original é alterado e desfazer é instantâneo."
+            ),
+            xalign=0,
+            wrap=True,
+        )
+        subtitle.add_css_class("muted")
+        hero.append(title)
+        hero.append(subtitle)
+        content.append(hero)
+
+        fair = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        fair.add_css_class("card")
+        fair_title = Gtk.Label(label="Jogo justo", xalign=0)
+        fair_title.add_css_class("warning")
+        fair_text = Gtk.Label(
+            label=(
+                "O theater vale quando você hospeda a partida (coop, prática ou servidor "
+                "próprio). Em servidores de terceiros o theater é definido pelo servidor e "
+                "o ajuste não se aplica — o que também evita vantagem indevida sobre outros "
+                "jogadores. Respeite sempre as regras do servidor ou do torneio."
+            ),
+            xalign=0,
+            wrap=True,
+        )
+        fair.append(fair_title)
+        fair.append(fair_text)
+        content.append(fair)
+
+        install_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        install_card.add_css_class("card")
+        install_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        install_inner.set_margin_start(18)
+        install_inner.set_margin_end(18)
+        install_inner.set_margin_top(16)
+        install_inner.set_margin_bottom(16)
+        install_caption = Gtk.Label(label="Instalação do Insurgency", xalign=0)
+        install_caption.add_css_class("section-title")
+        self.scopes_path_label = Gtk.Label(xalign=0, wrap=True)
+        self.scopes_path_label.add_css_class("muted")
+        manual_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.scopes_path_entry = Gtk.Entry(placeholder_text="Caminho manual, ex.: ~/.local/share/Steam/steamapps/common/insurgency2/insurgency")
+        self.scopes_path_entry.set_hexpand(True)
+        use_button = Gtk.Button(label="Usar este caminho")
+        use_button.connect("clicked", self.on_scopes_use_manual_path)
+        refresh_button = Gtk.Button(label="Procurar novamente")
+        refresh_button.connect("clicked", self.on_scopes_refresh_clicked)
+        manual_row.append(self.scopes_path_entry)
+        manual_row.append(use_button)
+        manual_row.append(refresh_button)
+        install_inner.append(install_caption)
+        install_inner.append(self.scopes_path_label)
+        install_inner.append(manual_row)
+        install_card.append(install_inner)
+        content.append(install_card)
+
+        settings_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        settings_card.add_css_class("card")
+        settings_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        settings_inner.set_margin_start(18)
+        settings_inner.set_margin_end(18)
+        settings_inner.set_margin_top(16)
+        settings_inner.set_margin_bottom(16)
+
+        target_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        target_label = Gtk.Label(label="Ampliação máxima", xalign=0)
+        target_label.set_size_request(190, -1)
+        self.target_value_label = Gtk.Label(xalign=1)
+        self.target_value_label.add_css_class("success")
+        target_row.append(target_label)
+        self.target_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, scopes.MIN_TARGET, scopes.MAX_TARGET, 0.5
+        )
+        self.target_scale.set_value(self.config["scopes"]["target"])
+        self.target_scale.set_digits(1)
+        self.target_scale.set_hexpand(True)
+        self.target_scale.connect("value-changed", self.on_scopes_target_changed)
+        target_row.append(self.target_scale)
+        target_row.append(self.target_value_label)
+        settings_inner.append(target_row)
+
+        optics_caption = Gtk.Label(label="Lunetas a ampliar", xalign=0)
+        optics_caption.add_css_class("category-label")
+        settings_inner.append(optics_caption)
+        self.scope_checks: dict[str, Gtk.CheckButton] = {}
+        for optic_id, label, _scope, _iron, _focus, mag in scopes.SCOPED_OPTICS:
+            check = Gtk.CheckButton(label=f"{label} — hoje {mag:g}x")
+            check.set_active(optic_id in self.config["scopes"]["optics"])
+            settings_inner.append(check)
+            self.scope_checks[optic_id] = check
+
+        autoexec_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        autoexec_label = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        autoexec_title = Gtk.Label(label="Ativar sozinho ao iniciar o jogo", xalign=0)
+        autoexec_hint = Gtk.Label(
+            label="Grava mp_theater_override no autoexec.cfg do jogo", xalign=0
+        )
+        autoexec_hint.add_css_class("category-label")
+        autoexec_label.append(autoexec_title)
+        autoexec_label.append(autoexec_hint)
+        autoexec_label.set_hexpand(True)
+        self.scopes_autoexec_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.scopes_autoexec_switch.set_active(bool(self.config["scopes"]["autoexec"]))
+        autoexec_row.append(autoexec_label)
+        autoexec_row.append(self.scopes_autoexec_switch)
+        settings_inner.append(autoexec_row)
+        settings_card.append(settings_inner)
+        content.append(settings_card)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.scopes_apply_button = Gtk.Button(label="Ativar lunetas ampliadas")
+        self.scopes_apply_button.add_css_class("suggested-action")
+        self.scopes_apply_button.connect("clicked", self.on_scopes_apply)
+        self.scopes_revert_button = Gtk.Button(label="Restaurar padrão do jogo")
+        self.scopes_revert_button.connect("clicked", self.on_scopes_revert)
+        actions.append(self.scopes_apply_button)
+        actions.append(self.scopes_revert_button)
+        content.append(actions)
+
+        self.scopes_status = Gtk.Label(xalign=0, wrap=True)
+        self.scopes_status.add_css_class("muted")
+        content.append(self.scopes_status)
+
+        note = Gtk.Label(
+            label=(
+                "Ativação manual (sem autoexec): abra o console do jogo e digite "
+                "mp_theater_override multilut_zoom antes de carregar o mapa. A mudança "
+                "vale na próxima partida hospedada por você."
+            ),
+            xalign=0,
+            wrap=True,
+        )
+        note.add_css_class("muted")
+        content.append(note)
+
+        scroller.set_child(content)
+        return scroller
+
+    def on_scopes_target_changed(self, _scale) -> None:
+        self.target_value_label.set_label(f"{self.target_scale.get_value():g}x")
+
+    def _selected_optics(self) -> list[str]:
+        return [
+            optic_id
+            for optic_id, check in self.scope_checks.items()
+            if check.get_active()
+        ]
+
+    def _persist_scopes_config(self) -> None:
+        self.config["scopes"]["target"] = self.target_scale.get_value()
+        self.config["scopes"]["optics"] = self._selected_optics()
+        self.config["scopes"]["autoexec"] = bool(self.scopes_autoexec_switch.get_active())
+        try:
+            core.save_config(self.config)
+        except (OSError, core.MultiLUTError) as exc:
+            self.toast(f"Não foi possível salvar as preferências das lunetas: {exc}", 6)
+
+    def refresh_scopes_page(self) -> None:
+        configured = self.config["scopes"].get("game_dir")
+        game_dir = None
+        if configured:
+            candidate = Path(configured).expanduser()
+            if (candidate / "scripts").is_dir():
+                game_dir = candidate
+        if game_dir is None:
+            found = scopes.find_game_dirs()
+            game_dir = found[0] if found else None
+        self.scopes_game_dir = game_dir
+        if game_dir is not None:
+            self.scopes_path_label.set_label(str(game_dir))
+            if scopes.is_applied(game_dir):
+                target = scopes.applied_target(game_dir)
+                text = f"Ativo: lunetas ampliadas para {target:g}x."
+                self.scopes_status.remove_css_class("overlay-off")
+                self.scopes_status.add_css_class("success")
+            else:
+                text = "Padrão do jogo — nenhum theater customizado ativo."
+                self.scopes_status.remove_css_class("success")
+                self.scopes_status.add_css_class("overlay-off")
+            self.scopes_status.set_label(text)
+        else:
+            self.scopes_path_label.set_label(
+                "Não encontrei a instalação do Insurgency nas bibliotecas Steam "
+                "conhecidas. Informe o caminho da pasta insurgency2/insurgency."
+            )
+            self.scopes_status.set_label("Informe o caminho do jogo para ativar.")
+            self.scopes_status.remove_css_class("success")
+        has_game = game_dir is not None
+        self.scopes_apply_button.set_sensitive(has_game)
+        self.scopes_revert_button.set_sensitive(has_game)
+
+    def on_scopes_use_manual_path(self, _button) -> None:
+        text = self.scopes_path_entry.get_text().strip()
+        if not text:
+            self.toast("Informe o caminho da pasta insurgency2/insurgency.", 5)
+            return
+        candidate = Path(text).expanduser()
+        if not (candidate / "scripts").is_dir():
+            self.toast(
+                "Essa pasta não parece ser a instalação do jogo (falta scripts/).", 6
+            )
+            return
+        self.config["scopes"]["game_dir"] = str(candidate)
+        try:
+            core.save_config(self.config)
+        except (OSError, core.MultiLUTError) as exc:
+            self.toast(f"Não foi possível salvar o caminho: {exc}", 6)
+        self.refresh_scopes_page()
+
+    def on_scopes_refresh_clicked(self, _button) -> None:
+        self.refresh_scopes_page()
+        if self.scopes_game_dir is not None:
+            self.toast("Instalação encontrada.")
+
+    def on_scopes_apply(self, _button) -> None:
+        if getattr(self, "scopes_game_dir", None) is None:
+            self.toast("Encontre ou informe a instalação do jogo primeiro.", 6)
+            return
+        optics = self._selected_optics()
+        if not optics:
+            self.toast("Selecione pelo menos uma luneta.", 5)
+            return
+        target = self.target_scale.get_value()
+        try:
+            scopes.apply_zoom(self.scopes_game_dir, target, optics)
+            scopes.set_autoexec_zoom(
+                self.scopes_game_dir, bool(self.scopes_autoexec_switch.get_active())
+            )
+        except (OSError, core.MultiLUTError) as exc:
+            self.toast(f"Não foi possível aplicar: {exc}", 8)
+            return
+        self._persist_scopes_config()
+        self.refresh_scopes_page()
+        self.toast(
+            f"Lunetas ampliadas para {target:g}x. Reinicie o jogo para valer.", 8
+        )
+
+    def on_scopes_revert(self, _button) -> None:
+        if getattr(self, "scopes_game_dir", None) is None:
+            self.toast("Encontre ou informe a instalação do jogo primeiro.", 6)
+            return
+        try:
+            changed = scopes.revert_zoom(self.scopes_game_dir)
+        except (OSError, core.MultiLUTError) as exc:
+            self.toast(f"Não foi possível restaurar: {exc}", 8)
+            return
+        self.refresh_scopes_page()
+        self.toast(
+            "Padrão do jogo restaurado." if changed else "Nada para restaurar."
+        )
 
     # ------------------------------------------------- processo do overlay
     def on_overlay_toggle(self, _button) -> None:

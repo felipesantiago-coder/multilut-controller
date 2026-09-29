@@ -170,6 +170,44 @@ SOLUÇÃO DE PROBLEMAS DA MIRA:
 - Código 3 no log significa que o GTK não conseguiu abrir o XWayland:
   verifique se "echo $DISPLAY" retorna algo na sua sessão.
 
+LUNETAS AMPLIADAS (ATE 12X)
+---------------------------
+
+A aba "Lunetas" aumenta a ampliação das lunetas do Insurgency usando o
+mecanismo oficial de theaters: o aplicativo gera o arquivo
+scripts/theaters/multilut_zoom.theater dentro da pasta do jogo e aponta
+mp_theater_override para ele (via autoexec.cfg ou comando no console).
+
+COMO FUNCIONA:
+
+- A ampliação de cada luneta vem do valor fov_wpn_scope do theater:
+  quanto menor o FOV, maior o zoom. A luneta "7x" usa FOV 10.
+- Para 12x, o aplicativo grava FOV 5.83 (10 x 7/12) nas lunetas
+  selecionadas. Lunetas 1x (red dots) não são alteradas.
+- Nenhum VPK ou arquivo original do jogo é modificado: o theater é um
+  arquivo novo, e restaurar o padrão é apagar o arquivo e a linha do
+  autoexec (o botão "Restaurar padrão do jogo" faz os dois).
+
+LUNETAS DISPONÍVEIS:
+
+- Luneta 7x (Mosin, FAL, SKS) — 7x até 12x.
+- Luneta MK4 (M40A1, M14, M16A4) — 7x até 12x.
+- PO 4x24 (AKM, FAL, Galil, Mosin) — 4x até 12x.
+- Elcan (armas Security) — 4x até 12x.
+- Aimpoint 2x — 2x até 12x.
+
+ONDE VALE E JOGO JUSTO:
+
+- O theater é carregado quando VOCÊ hospeda a partida: coop, prática ou
+  servidor próprio. Reinicie o jogo depois de ativar.
+- Em servidores de terceiros o theater é definido pelo servidor, então
+  o ajuste não se aplica lá. Respeite as regras do servidor ou torneio.
+- O recurso usa apenas arquivos de configuração suportados pelo jogo:
+  não lê memória, não injeta código e não interfere na rede.
+
+O caminho do jogo é detectado automaticamente nas bibliotecas Steam
+(incluindo Flatpak); também pode ser informado manualmente na aba.
+
 SEGURANCA DOS ARQUIVOS
 ----------------------
 
