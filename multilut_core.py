@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from typing import Iterable
 
 
@@ -62,6 +63,22 @@ PROFILES: tuple[Profile, ...] = (
 )
 
 PROFILE_BY_ID = {profile.id: profile for profile in PROFILES}
+
+
+def _profile_sort_key(profile: Profile) -> str:
+    """Chave alfabética sem acentos e insensível a maiúsculas."""
+    decomposed = unicodedata.normalize("NFKD", profile.name)
+    without_accents = "".join(
+        char for char in decomposed if not unicodedata.combining(char)
+    )
+    return without_accents.casefold()
+
+
+def profiles_alphabetical(
+    profiles: Iterable[Profile] = PROFILES,
+) -> tuple[Profile, ...]:
+    """Perfis em ordem alfabética para exibição; os IDs não mudam."""
+    return tuple(sorted(profiles, key=_profile_sort_key))
 
 
 class MultiLUTError(RuntimeError):

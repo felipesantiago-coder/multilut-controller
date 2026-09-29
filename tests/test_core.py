@@ -63,6 +63,20 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(previous, 14)
         self.assertFalse(core.backup_path(self.path).exists())
 
+    def test_profiles_alphabetical_preserves_ids(self):
+        ordered = core.profiles_alphabetical()
+        self.assertEqual(
+            sorted(profile.id for profile in ordered),
+            sorted(profile.id for profile in core.PROFILES),
+        )
+
+    def test_profiles_alphabetical_order(self):
+        ordered = core.profiles_alphabetical()
+        keys = [core._profile_sort_key(profile) for profile in ordered]
+        self.assertEqual(keys, sorted(keys))
+        self.assertEqual(ordered[0].name, "Alto contraste competitivo")
+        self.assertEqual(ordered[-1].name, "Verticality")
+
 
 if __name__ == "__main__":
     unittest.main()

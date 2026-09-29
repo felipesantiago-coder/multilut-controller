@@ -211,7 +211,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.profile_list = Gtk.ListBox()
         self.profile_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.profile_list.connect("row-selected", self.on_profile_selected)
-        for profile in core.PROFILES:
+        for profile in core.profiles_alphabetical():
             self.profile_list.append(ProfileRow(profile))
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -653,12 +653,17 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.detail_tone.set_label(f"Resposta visual: {profile.tone}")
 
     def select_profile_id(self, profile_id: int) -> None:
+        # A lista aparece em ordem alfabética: localize pelo id do perfil,
+        # não pela posição da linha.
         self._programmatic_selection = True
         try:
-            row = self.profile_list.get_row_at_index(profile_id)
-            if row is not None:
-                self.profile_list.select_row(row)
-                self.update_detail(row.profile)
+            row = self.profile_list.get_first_child()
+            while row is not None:
+                if row.profile.id == profile_id:
+                    self.profile_list.select_row(row)
+                    self.update_detail(row.profile)
+                    break
+                row = row.get_next_sibling()
         finally:
             self._programmatic_selection = False
 
