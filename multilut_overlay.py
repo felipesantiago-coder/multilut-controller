@@ -25,10 +25,19 @@ BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+import warnings
+
 import gi
 
 gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Gio, GLib, Gtk
+
+try:
+    from gi import PyGIDeprecationWarning
+    warnings.filterwarnings("ignore", category=PyGIDeprecationWarning)
+except ImportError:  # pragma: no cover
+    pass
 
 try:
     gi.require_version("GdkX11", "4.0")
@@ -316,7 +325,10 @@ def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1].isdigit():
         parent_pid = int(sys.argv[1])
     app = OverlayApplication(parent_pid)
-    return app.run(sys.argv)
+    # NUNCA passar sys.argv para o GApplication: o PID posicional seria
+    # interpretado como arquivo a abrir ("This application can not open
+    # files") e a ativação — que cria a janela — nunca aconteceria.
+    return app.run([])
 
 
 if __name__ == "__main__":
