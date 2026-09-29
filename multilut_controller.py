@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import subprocess
 import sys
 
 try:
@@ -21,6 +23,8 @@ except (ImportError, ValueError) as exc:
     raise SystemExit(2) from exc
 
 import multilut_core as core
+import multilut_aim as aim
+import multilut_trainer as training
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -61,6 +65,10 @@ window { background: @window_bg_color; }
 .sidebar { background: alpha(@headerbar_bg_color, 0.72); }
 list row { border-radius: 10px; margin: 2px 6px; }
 list row:selected { background: alpha(@accent_bg_color, 0.18); }
+.stat-value { font-size: 24px; font-weight: 800; }
+.stat-caption { color: alpha(currentColor, 0.62); font-size: 12px; }
+.overlay-live { color: #2ec27e; font-weight: 700; }
+.overlay-off { color: alpha(currentColor, 0.67); }
 """
 
 
@@ -109,13 +117,18 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.shader_valid = False
         self.file_monitor = None
         self._programmatic_selection = False
+        self.config["crosshair"] = aim.crosshair_config_from_config(self.config)
+        self.overlay_process = None
+        self.overlay_poll_id = None
+        self._crosshair_save_pending = None
 
         self.toast_overlay = Adw.ToastOverlay()
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
-        title = Gtk.Label(label="MultiLUT Controller")
-        title.add_css_class("app-title")
-        header.set_title_widget(title)
+        self.view_stack = Adw.ViewStack()
+        self.view_stack.set_vexpand(True)
+        switcher = Adw.ViewSwitcher(stack=self.view_stack, policy=Adw.ViewSwitcherPolicy.WIDE)
+        header.set_title_widget(switcher)
 
         self.restore_button = Gtk.Button.new_from_icon_name("edit-undo-symbolic")
         self.restore_button.set_tooltip_text("Restaurar último backup")
@@ -160,13 +173,33 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         paned.set_wide_handle(True)
         paned.set_start_child(self.build_sidebar())
         paned.set_end_child(self.build_detail())
-        body.append(paned)
+
+        page_profiles = self.view_stack.add_titled(paned, "profiles", "Perfis")
+        page_profiles.set_icon_name("view-grid-symbolic")
+        page_trainer = self.view_stack.add_titled(
+            self.build_trainer_page(), "trainer", "Treino de mira"
+        )
+        page_trainer.set_icon_name("input-gaming-symbolic")
+        page_progress = self.view_stack.add_titled(
+            self.build_progress_page(), "progress", "Progresso"
+        )
+        page_progress.set_icon_name("starred-symbolic")
+        page_overlay = self.view_stack.add_titled(
+            self.build_overlay_page(), "overlay", "Mira na tela"
+        )
+        page_overlay.set_icon_name("find-location-symbolic")
+
+        body.append(self.view_stack)
+
         toolbar.set_content(body)
         self.toast_overlay.set_child(toolbar)
         self.set_content(self.toast_overlay)
+        self.connect("destroy", self.on_window_destroy)
 
         self.refresh_shader_status(select_active=True)
         self.refresh_game_status()
+        self.refresh_progress_page()
+        self.update_overlay_ui()
         GLib.timeout_add_seconds(2, self.refresh_game_status)
         self.start_file_monitor()
 
@@ -334,6 +367,421 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         scroller.set_child(content)
         self.update_detail(self.selected_profile)
         return scroller
+
+    # ------------------------------------------------------------ treino de mira
+    def build_trainer_page(self) -> Gtk.Widget:
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        content.set_margin_start(22)
+        content.set_margin_end(22)
+        content.set_margin_top(18)
+        content.set_margin_bottom(18)
+        self.trainer = training.FlickTrainer(on_session_saved=self.on_session_saved)
+        content.append(self.trainer)
+        return content
+
+    def on_session_saved(self, _session: dict) -> None:
+        self.refresh_progress_page()
+        self.toast("Rodada de treino salva no histórico.", 4)
+
+    # --------------------------------------------------------------- progresso
+    def _make_stat_card(self, caption: str) -> tuple[Gtk.Box, Gtk.Label]:
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        card.add_css_class("card")
+        card.set_margin_top(12)
+        card.set_margin_bottom(12)
+        value = Gtk.Label(label="—")
+        value.add_css_class("stat-value")
+        value.set_halign(Gtk.Align.CENTER)
+        caption_label = Gtk.Label(label=caption)
+        caption_label.add_css_class("stat-caption")
+        caption_label.set_halign(Gtk.Align.CENTER)
+        card.append(value)
+        card.append(caption_label)
+        return card, value
+
+    def build_progress_page(self) -> Gtk.Widget:
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        content.set_margin_start(26)
+        content.set_margin_end(26)
+        content.set_margin_top(24)
+        content.set_margin_bottom(24)
+
+        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        title = Gtk.Label(label="Progresso de mira", xalign=0)
+        title.add_css_class("hero-title")
+        subtitle = Gtk.Label(
+            label=(
+                "Cada rodada do treino de flick é registrada aqui. As linhas usam a "
+                "média móvel das últimas 5 rodadas para mostrar a tendência real, "
+                "sem se assustar com variações de um dia ruim."
+            ),
+            xalign=0,
+            wrap=True,
+        )
+        subtitle.add_css_class("muted")
+        hero.append(title)
+        hero.append(subtitle)
+        content.append(hero)
+
+        stats_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        stats_row.set_homogeneous(True)
+        self._stat_rounds_box, self.stat_rounds = self._make_stat_card("Rodadas treinadas")
+        self._stat_reaction_box, self.stat_reaction = self._make_stat_card("Melhor reação")
+        self._stat_accuracy_box, self.stat_accuracy = self._make_stat_card("Precisão média")
+        self._stat_tempo_box, self.stat_tempo = self._make_stat_card("Ritmo médio")
+        stats_row.append(self._stat_rounds_box)
+        stats_row.append(self._stat_reaction_box)
+        stats_row.append(self._stat_accuracy_box)
+        stats_row.append(self._stat_tempo_box)
+        content.append(stats_row)
+
+        charts = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        charts.set_homogeneous(True)
+        self.chart_reaction = training.TrendChart(
+            "Reação média por rodada (ms)", " ms", (0.21, 0.52, 0.89)
+        )
+        self.chart_accuracy = training.TrendChart(
+            "Precisão por rodada (%)", "%", (0.18, 0.76, 0.50)
+        )
+        charts.append(self.chart_reaction)
+        charts.append(self.chart_accuracy)
+        content.append(charts)
+
+        danger_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.clear_history_button = Gtk.Button(label="Limpar histórico de treino")
+        self.clear_history_button.add_css_class("destructive-action")
+        self.clear_history_button.connect("clicked", self.on_clear_history_clicked)
+        danger_row.append(self.clear_history_button)
+        clear_hint = Gtk.Label(
+            label="O histórico fica em ~/.config/multilut-controller/training_history.json",
+            xalign=0,
+        )
+        clear_hint.add_css_class("muted")
+        clear_hint.set_hexpand(True)
+        danger_row.append(clear_hint)
+        content.append(danger_row)
+
+        scroller.set_child(content)
+        return scroller
+
+    def refresh_progress_page(self) -> None:
+        sessions = aim.load_training_sessions()
+        summary = aim.summarize_sessions(sessions)
+        self.stat_rounds.set_label(str(summary["rounds"]))
+        if summary["best_reaction_ms"] > 0:
+            self.stat_reaction.set_label(f"{summary['best_reaction_ms']:.0f} ms")
+        else:
+            self.stat_reaction.set_label("—")
+        if summary["rounds"] > 0:
+            self.stat_accuracy.set_label(f"{summary['avg_accuracy']:.0f}%")
+            self.stat_tempo.set_label(f"{summary['avg_targets_per_minute']:.0f}/min")
+        else:
+            self.stat_accuracy.set_label("—")
+            self.stat_tempo.set_label("—")
+        self.chart_reaction.set_series(
+            [float(item.get("avg_reaction_ms", 0.0) or 0.0) for item in sessions]
+        )
+        self.chart_accuracy.set_series(
+            [aim.session_accuracy(item) for item in sessions]
+        )
+
+    def on_clear_history_clicked(self, _button) -> None:
+        dialog = Adw.MessageDialog.new(
+            self,
+            "Limpar o histórico de treino?",
+            "Todas as rodadas registradas serão apagadas definitivamente. "
+            "A configuração da mira e os perfis do shader não são afetados.",
+        )
+        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("clear", "Apagar tudo")
+        dialog.set_response_appearance("clear", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.connect("response", self.on_clear_history_response)
+        dialog.present()
+
+    def on_clear_history_response(self, dialog, response: str) -> None:
+        dialog.destroy()
+        if response != "clear":
+            return
+        try:
+            aim.clear_training_sessions()
+        except (OSError, core.MultiLUTError) as exc:
+            self.toast(f"Não foi possível limpar o histórico: {exc}", 6)
+            return
+        self.refresh_progress_page()
+        self.toast("Histórico de treino apagado.")
+
+    # ------------------------------------------------------------ mira na tela
+    def build_overlay_page(self) -> Gtk.Widget:
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        content.set_margin_start(26)
+        content.set_margin_end(26)
+        content.set_margin_top(24)
+        content.set_margin_bottom(24)
+
+        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        title = Gtk.Label(label="Mira na tela", xalign=0)
+        title.add_css_class("hero-title")
+        subtitle = Gtk.Label(
+            label=(
+                "Mira customizada desenhada sobre o jogo pelo XWayland, com região de "
+                "entrada vazia: nenhum clique é capturado. O recurso é apenas visual — "
+                "não modifica o jogo, não lê memória e não interfere na rede."
+            ),
+            xalign=0,
+            wrap=True,
+        )
+        subtitle.add_css_class("muted")
+        hero.append(title)
+        hero.append(subtitle)
+        content.append(hero)
+
+        preview_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview_card.add_css_class("card")
+        preview_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview_inner.set_margin_start(18)
+        preview_inner.set_margin_end(18)
+        preview_inner.set_margin_top(16)
+        preview_inner.set_margin_bottom(16)
+        self.crosshair_preview = training.CrosshairPreview()
+        self.crosshair_preview.set_config(self.config["crosshair"])
+        preview_inner.append(self.crosshair_preview)
+        preview_caption = Gtk.Label(label="Pré-visualização — a mira real fica no centro do monitor escolhido.")
+        preview_caption.add_css_class("category-label")
+        preview_inner.append(preview_caption)
+        preview_card.append(preview_inner)
+        content.append(preview_card)
+
+        settings_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        settings_card.add_css_class("card")
+        settings_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        settings_inner.set_margin_start(18)
+        settings_inner.set_margin_end(18)
+        settings_inner.set_margin_top(16)
+        settings_inner.set_margin_bottom(16)
+
+        color_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        color_label = Gtk.Label(label="Cor da mira", xalign=0)
+        color_label.set_hexpand(True)
+        self.color_button = Gtk.ColorDialogButton()
+        self.color_button.set_dialog(Gtk.ColorDialog())
+        rgba = Gdk.RGBA()
+        rgba.parse(self.config["crosshair"]["color"])
+        self.color_button.set_rgba(rgba)
+        self.color_button.connect("notify::rgba", self.on_crosshair_changed)
+        color_row.append(color_label)
+        color_row.append(self.color_button)
+        settings_inner.append(color_row)
+
+        self.length_scale = self._make_scale_row(
+            settings_inner, "Comprimento dos traços",
+            self.config["crosshair"]["length"], 2, 40, 1,
+        )
+        self.thickness_scale = self._make_scale_row(
+            settings_inner, "Espessura",
+            self.config["crosshair"]["thickness"], 1, 8, 1,
+        )
+        self.gap_scale = self._make_scale_row(
+            settings_inner, "Vão central",
+            self.config["crosshair"]["gap"], 0, 40, 1,
+        )
+        self.opacity_scale = self._make_scale_row(
+            settings_inner, "Opacidade (%)",
+            round(self.config["crosshair"]["opacity"] * 100), 10, 100, 5,
+        )
+
+        dot_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        dot_label = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        dot_title = Gtk.Label(label="Ponto central", xalign=0)
+        dot_hint = Gtk.Label(label="Preenche o vão com um ponto", xalign=0)
+        dot_hint.add_css_class("category-label")
+        dot_label.append(dot_title)
+        dot_label.append(dot_hint)
+        dot_label.set_hexpand(True)
+        self.dot_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.dot_switch.set_active(bool(self.config["crosshair"]["dot"]))
+        self.dot_switch.connect("notify::active", self.on_crosshair_changed)
+        dot_row.append(dot_label)
+        dot_row.append(self.dot_switch)
+        settings_inner.append(dot_row)
+
+        outline_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        outline_label = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        outline_title = Gtk.Label(label="Contorno escuro", xalign=0)
+        outline_hint = Gtk.Label(label="Garante contraste sobre cenários claros", xalign=0)
+        outline_hint.add_css_class("category-label")
+        outline_label.append(outline_title)
+        outline_label.append(outline_hint)
+        outline_label.set_hexpand(True)
+        self.outline_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.outline_switch.set_active(bool(self.config["crosshair"]["outline"]))
+        self.outline_switch.connect("notify::active", self.on_crosshair_changed)
+        outline_row.append(outline_label)
+        outline_row.append(self.outline_switch)
+        settings_inner.append(outline_row)
+
+        settings_card.append(settings_inner)
+        content.append(settings_card)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.overlay_button = Gtk.Button(label="Ativar mira na tela")
+        self.overlay_button.add_css_class("suggested-action")
+        self.overlay_button.connect("clicked", self.on_overlay_toggle)
+        self.overlay_status = Gtk.Label(xalign=0)
+        actions.append(self.overlay_button)
+        actions.append(self.overlay_status)
+        content.append(actions)
+
+        note = Gtk.Label(
+            label=(
+                "O overlay é criado no monitor onde o mouse estava ao ativar e fecha "
+                "sozinho quando o controlador sai. Se a mira não aparecer sobre o jogo "
+                "em tela cheia exclusiva, use o modo tela cheia (sem borda) do Insurgency."
+            ),
+            xalign=0,
+            wrap=True,
+        )
+        note.add_css_class("muted")
+        content.append(note)
+
+        scroller.set_child(content)
+        return scroller
+
+    def _make_scale_row(self, parent: Gtk.Box, caption: str, value: int,
+                        low: int, high: int, step: int) -> Gtk.Scale:
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        label = Gtk.Label(label=caption, xalign=0)
+        label.set_size_request(190, -1)
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, low, high, step)
+        scale.set_value(value)
+        scale.set_digits(0)
+        scale.set_hexpand(True)
+        scale.connect("value-changed", self.on_crosshair_changed)
+        row.append(label)
+        row.append(scale)
+        parent.append(row)
+        return scale
+
+    def _gather_crosshair(self) -> dict:
+        return {
+            "color": self._current_color_hex(),
+            "length": int(self.length_scale.get_value()),
+            "thickness": int(self.thickness_scale.get_value()),
+            "gap": int(self.gap_scale.get_value()),
+            "dot": self.dot_switch.get_active(),
+            "outline": self.outline_switch.get_active(),
+            "opacity": self.opacity_scale.get_value() / 100.0,
+        }
+
+    def _current_color_hex(self) -> str:
+        rgba = self.color_button.get_rgba()
+        return "#{:02x}{:02x}{:02x}".format(
+            round(rgba.red * 255), round(rgba.green * 255), round(rgba.blue * 255)
+        )
+
+    def on_crosshair_changed(self, *args) -> None:
+        self.crosshair_preview.set_config(self._gather_crosshair())
+        if self._crosshair_save_pending is not None:
+            GLib.source_remove(self._crosshair_save_pending)
+        self._crosshair_save_pending = GLib.timeout_add(250, self._commit_crosshair_save)
+
+    def _commit_crosshair_save(self) -> bool:
+        self._crosshair_save_pending = None
+        self.config["crosshair"] = aim.normalize_crosshair_config(self._gather_crosshair())
+        try:
+            core.save_config(self.config)
+        except (OSError, core.MultiLUTError) as exc:
+            self.toast(f"Não foi possível salvar a mira: {exc}", 6)
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_REMOVE
+
+    # ------------------------------------------------- processo do overlay
+    def on_overlay_toggle(self, _button) -> None:
+        if self.overlay_process is not None and self.overlay_process.poll() is None:
+            self.stop_overlay()
+            self.toast("Mira na tela encerrada.")
+            return
+        self.start_overlay()
+
+    def start_overlay(self) -> None:
+        script = BASE_DIR / "multilut_overlay.py"
+        if not script.is_file():
+            self.toast("multilut_overlay.py não encontrado na instalação.", 6)
+            return
+        env = dict(os.environ)
+        env["GDK_BACKEND"] = "x11"
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        try:
+            self.overlay_process = subprocess.Popen(
+                [sys.executable, str(script), str(os.getpid())],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            self.toast(f"Não foi possível iniciar o overlay: {exc}", 6)
+            return
+        self.update_overlay_ui()
+        if self.overlay_poll_id is None:
+            self.overlay_poll_id = GLib.timeout_add_seconds(1, self.poll_overlay)
+
+    def stop_overlay(self) -> None:
+        process = self.overlay_process
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+        self.overlay_process = None
+        if self.overlay_poll_id is not None:
+            GLib.source_remove(self.overlay_poll_id)
+            self.overlay_poll_id = None
+        self.update_overlay_ui()
+
+    def poll_overlay(self) -> bool:
+        process = self.overlay_process
+        if process is not None and process.poll() is not None:
+            code = process.returncode
+            self.overlay_process = None
+            self.overlay_poll_id = None
+            self.update_overlay_ui()
+            if code != 0:
+                self.toast(
+                    "O overlay foi encerrado. Se a mira não apareceu, verifique o "
+                    "XWayland (DISPLAY) na sua sessão.",
+                    6,
+                )
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def update_overlay_ui(self) -> None:
+        running = self.overlay_process is not None and self.overlay_process.poll() is None
+        if running:
+            self.overlay_button.set_label("Encerrar mira na tela")
+            self.overlay_button.remove_css_class("suggested-action")
+            self.overlay_status.set_label(
+                "Mira ativa no XWayland — ajustes aqui atualizam em tempo real."
+            )
+            self.overlay_status.remove_css_class("overlay-off")
+            self.overlay_status.add_css_class("overlay-live")
+        else:
+            self.overlay_button.set_label("Ativar mira na tela")
+            self.overlay_button.add_css_class("suggested-action")
+            self.overlay_status.set_label("Mira desligada.")
+            self.overlay_status.remove_css_class("overlay-live")
+            self.overlay_status.add_css_class("overlay-off")
+
+    def on_window_destroy(self, _window) -> None:
+        self.stop_overlay()
 
     def toast(self, message: str, timeout: int = 4) -> None:
         toast = Adw.Toast.new(message)
