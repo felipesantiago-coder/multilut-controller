@@ -129,7 +129,10 @@ ONDE VALE E JOGO JUSTO:
   não lê memória, não injeta código e não interfere na rede.
 
 O caminho do jogo é detectado automaticamente nas bibliotecas Steam
-(incluindo Flatpak); também pode ser informado manualmente na aba.
+(incluindo Flatpak); também pode ser informado manualmente na aba. A pasta
+é reconhecida pelas subpastas típicas do jogo (maps, cfg, materials…) — a
+instalação não precisa ter a pasta scripts/ no disco: o aplicativo cria
+scripts/theaters na hora de gravar o theater.
 
 SEGURANCA DOS ARQUIVOS
 ----------------------

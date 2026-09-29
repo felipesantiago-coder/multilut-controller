@@ -39,9 +39,14 @@ AUTOEXEC_LINE = f'mp_theater_override "{THEATER_NAME}"'
 STEAM_ROOTS = (
     "~/.local/share/Steam",
     "~/.steam/steam",
+    "~/.steam/root",
     "~/.steam/debian-installation",
     "~/.var/app/com.valvesoftware.Steam/.local/share/Steam",
 )
+
+# Subpastas típicas de um jogo Source; servem para reconhecer a instalação
+# mesmo quando o conteúdo está empacotado em VPK (sem scripts/ solto no disco).
+GAME_DIR_MARKERS = ("scripts", "maps", "cfg", "materials", "models", "sound")
 
 # (id, rótulo, fov_wpn_scope, fov_wpn_ironsight, fov_wpn_focus, ampliação nominal)
 SCOPED_OPTICS: tuple[tuple[str, str, float, float, float, float], ...] = (
@@ -166,12 +171,28 @@ def theater_path(game_dir: Path | str) -> Path:
     return Path(game_dir) / "scripts" / "theaters" / f"{THEATER_NAME}.theater"
 
 
+def looks_like_game_dir(path: Path | str) -> bool:
+    """Reconhece a pasta do jogo por marcadores do Source, sem exigir scripts/.
+
+    Aceita quando a pasta tem ao menos duas das subpastas típicas do jogo
+    (maps, cfg, materials…) ou quando se chama "insurgency" — o nome padrão
+    da pasta do jogo dentro de insurgency2.
+    """
+    candidate = Path(path)
+    if not candidate.is_dir():
+        return False
+    markers = sum(1 for item in GAME_DIR_MARKERS if (candidate / item).is_dir())
+    return markers >= 2 or candidate.name.casefold() == "insurgency"
+
+
 def _validate_game_dir(game_dir: Path | str) -> Path:
     path = Path(game_dir)
-    if not (path / "scripts").is_dir():
+    if not path.is_dir():
+        raise MultiLUTError(f"A pasta do jogo não existe: {path}")
+    if not looks_like_game_dir(path):
         raise MultiLUTError(
-            "A pasta do jogo informada não parece ser a instalação do Insurgency "
-            "(falta a subpasta scripts)."
+            "A pasta informada não parece ser a instalação do Insurgency: "
+            "não encontrei as subpastas típicas do jogo (maps, cfg, scripts…)."
         )
     return path
 
@@ -296,6 +317,6 @@ def find_game_dirs(roots: list[Path | str] | None = None) -> list[Path]:
     found: list[Path] = []
     for lib in libraries:
         candidate = lib / "steamapps" / "common" / "insurgency2" / "insurgency"
-        if (candidate / "scripts").is_dir() and candidate not in found:
+        if looks_like_game_dir(candidate) and candidate not in found:
             found.append(candidate)
     return found

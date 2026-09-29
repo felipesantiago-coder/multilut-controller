@@ -548,7 +548,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         game_dir = None
         if configured:
             candidate = Path(configured).expanduser()
-            if (candidate / "scripts").is_dir():
+            if scopes.looks_like_game_dir(candidate):
                 game_dir = candidate
         if game_dir is None:
             found = scopes.find_game_dirs()
@@ -569,7 +569,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         else:
             self.scopes_path_label.set_label(
                 "Não encontrei a instalação do Insurgency nas bibliotecas Steam "
-                "conhecidas. Informe o caminho da pasta insurgency2/insurgency."
+                "conhecidas. Informe o caminho manualmente — ex.: "
+                "~/.local/share/Steam/steamapps/common/insurgency2/insurgency."
             )
             self.scopes_status.set_label("Informe o caminho do jogo para ativar.")
             self.scopes_status.remove_css_class("success")
@@ -584,9 +585,16 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.toast("Informe o caminho da pasta insurgency2/insurgency.", 5)
             return
         candidate = Path(text).expanduser()
-        if not (candidate / "scripts").is_dir():
+        if not candidate.exists():
+            self.toast(f"A pasta não existe: {candidate}", 6)
+            return
+        if not candidate.is_dir():
+            self.toast(f"O caminho informado não é uma pasta: {candidate}", 6)
+            return
+        if not scopes.looks_like_game_dir(candidate):
             self.toast(
-                "Essa pasta não parece ser a instalação do jogo (falta scripts/).", 6
+                "Essa pasta existe, mas não reconheci a instalação do jogo: "
+                "faltam subpastas típicas (maps, cfg, scripts…).", 7
             )
             return
         self.config["scopes"]["game_dir"] = str(candidate)
@@ -594,7 +602,9 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             core.save_config(self.config)
         except (OSError, core.MultiLUTError) as exc:
             self.toast(f"Não foi possível salvar o caminho: {exc}", 6)
+            return
         self.refresh_scopes_page()
+        self.toast("Instalação do jogo reconhecida.", 4)
 
     def on_scopes_refresh_clicked(self, _button) -> None:
         self.refresh_scopes_page()

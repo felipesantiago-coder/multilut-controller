@@ -232,5 +232,62 @@ class QuickTargetsTests(unittest.TestCase):
             self.assertLessEqual(mag, scopes.MAX_TARGET)
 
 
+class LooksLikeGameDirTests(unittest.TestCase):
+    def test_accepts_dir_with_two_source_markers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp) / "insurgency"
+            (game / "maps").mkdir(parents=True)
+            (game / "cfg").mkdir()
+            self.assertTrue(scopes.looks_like_game_dir(game))
+
+    def test_accepts_dir_without_scripts(self):
+        # Instalação com conteúdo empacotado em VPK: nada de scripts/ solto.
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp) / "insurgency"
+            for marker in ("maps", "materials", "models", "sound"):
+                (game / marker).mkdir(parents=True)
+            self.assertTrue(scopes.looks_like_game_dir(game))
+            self.assertFalse((game / "scripts").exists())
+
+    def test_accepts_folder_named_insurgency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp) / "Insurgency"
+            game.mkdir()
+            self.assertTrue(scopes.looks_like_game_dir(game))
+
+    def test_rejects_dir_with_single_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            other = Path(tmp) / "outro"
+            (other / "maps").mkdir(parents=True)
+            self.assertFalse(scopes.looks_like_game_dir(other))
+
+    def test_rejects_missing_or_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(scopes.looks_like_game_dir(Path(tmp) / "nada"))
+            arquivo = Path(tmp) / "arquivo.txt"
+            arquivo.write_text("x", encoding="utf-8")
+            self.assertFalse(scopes.looks_like_game_dir(arquivo))
+
+
+class FindGameDirsWithoutScriptsTests(unittest.TestCase):
+    def test_finds_install_without_scripts_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            steam = Path(tmp) / "steam"
+            game = steam / "steamapps" / "common" / "insurgency2" / "insurgency"
+            for marker in ("maps", "cfg", "materials", "models"):
+                (game / marker).mkdir(parents=True)
+            found = scopes.find_game_dirs(roots=[steam])
+            self.assertIn(game, found)
+
+    def test_apply_creates_missing_scripts_theaters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp) / "insurgency"
+            (game / "maps").mkdir(parents=True)
+            (game / "cfg").mkdir()
+            path = scopes.apply_zoom(game, 12.0, ["optic_scope_7x"])
+            self.assertTrue(path.is_file())
+            self.assertTrue((game / "scripts" / "theaters").is_dir())
+
+
 if __name__ == "__main__":
     unittest.main()
