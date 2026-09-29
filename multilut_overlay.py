@@ -295,6 +295,17 @@ class OverlayApplication(Gtk.Application):
         return GLib.SOURCE_REMOVE
 
     def do_activate(self):
+        # O display só existe depois que o Gtk.Application.startup rodou o
+        # gtk_init; a checagem precisa acontecer aqui, nunca antes de run().
+        if Gdk.Display.get_default() is None:
+            print(
+                "MultiLUT Overlay: display X11/XWayland indisponível após a "
+                "inicialização do GTK.\nConfira se o XWayland está ativo na sua "
+                "sessão GNOME Wayland (variável DISPLAY definida).",
+                file=sys.stderr,
+            )
+            sys.stderr.flush()
+            os._exit(3)
         if self.window is None:
             self.window = OverlayWindow(self, self.parent_pid)
         self.window.present()
@@ -304,14 +315,6 @@ def main() -> int:
     parent_pid = None
     if len(sys.argv) > 1 and sys.argv[1].isdigit():
         parent_pid = int(sys.argv[1])
-    display = Gdk.Display.get_default()
-    if display is None:
-        print(
-            "MultiLUT Overlay: não foi possível abrir o display X11/XWayland.\n"
-            "Confira se o XWayland está ativo (DISPLAY definido) no seu GNOME Wayland.",
-            file=sys.stderr,
-        )
-        return 3
     app = OverlayApplication(parent_pid)
     return app.run(sys.argv)
 

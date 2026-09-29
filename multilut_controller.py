@@ -120,6 +120,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.config["crosshair"] = aim.crosshair_config_from_config(self.config)
         self.overlay_process = None
         self.overlay_poll_id = None
+        self._overlay_log_file = None
         self._crosshair_save_pending = None
 
         self.toast_overlay = Adw.ToastOverlay()
@@ -714,20 +715,45 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         env = dict(os.environ)
         env["GDK_BACKEND"] = "x11"
         env.setdefault("PYTHONUNBUFFERED", "1")
+        log_handle = self._open_overlay_log()
         try:
             self.overlay_process = subprocess.Popen(
                 [sys.executable, str(script), str(os.getpid())],
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_handle if log_handle else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if log_handle else subprocess.DEVNULL,
                 start_new_session=True,
             )
         except OSError as exc:
+            if log_handle is not None:
+                log_handle.close()
             self.toast(f"Não foi possível iniciar o overlay: {exc}", 6)
             return
+        self._overlay_log_file = log_handle
         self.update_overlay_ui()
         if self.overlay_poll_id is None:
             self.overlay_poll_id = GLib.timeout_add_seconds(1, self.poll_overlay)
+
+    @staticmethod
+    def _overlay_log_path() -> Path:
+        state_dir = Path(GLib.get_user_state_dir()) / "multilut-controller"
+        return state_dir / "overlay.log"
+
+    def _open_overlay_log(self):
+        """Abre o log do overlay (trunca a cada início); None se não der."""
+        try:
+            self._overlay_log_path().parent.mkdir(parents=True, exist_ok=True)
+            return open(self._overlay_log_path(), "w", encoding="utf-8")
+        except OSError:
+            return None
+
+    def _close_overlay_log(self) -> None:
+        if getattr(self, "_overlay_log_file", None) is not None:
+            try:
+                self._overlay_log_file.close()
+            except OSError:
+                pass
+            self._overlay_log_file = None
 
     def stop_overlay(self) -> None:
         process = self.overlay_process
@@ -742,6 +768,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                 except subprocess.TimeoutExpired:
                     pass
         self.overlay_process = None
+        self._close_overlay_log()
         if self.overlay_poll_id is not None:
             GLib.source_remove(self.overlay_poll_id)
             self.overlay_poll_id = None
@@ -753,12 +780,13 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             code = process.returncode
             self.overlay_process = None
             self.overlay_poll_id = None
+            self._close_overlay_log()
             self.update_overlay_ui()
             if code != 0:
                 self.toast(
-                    "O overlay foi encerrado. Se a mira não apareceu, verifique o "
-                    "XWayland (DISPLAY) na sua sessão.",
-                    6,
+                    f"O overlay saiu (código {code}). Detalhes em: "
+                    f"{self._overlay_log_path()}",
+                    8,
                 )
             return GLib.SOURCE_REMOVE
         return GLib.SOURCE_CONTINUE

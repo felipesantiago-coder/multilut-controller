@@ -159,6 +159,17 @@ REQUISITOS DA MIRA NA TELA:
 - Se o jogo estiver em tela cheia exclusiva e a mira não aparecer, use o
   modo "tela cheia (sem borda)" ou janela nas opções de vídeo do jogo.
 
+SOLUÇÃO DE PROBLEMAS DA MIRA:
+
+- Se a mira não aparecer, o jogo não precisa estar aberto: a mira funciona
+  também sobre a área de trabalho. Verifique se o monitor escolhido é o
+  mesmo que você está olhando (o overlay nasce onde o mouse estava).
+- Se o aviso "O overlay saiu (código X)" aparecer, leia o log em
+  ~/.local/state/multilut-controller/overlay.log — toda saída do processo
+  do overlay é gravada nesse arquivo a cada ativação.
+- Código 3 no log significa que o GTK não conseguiu abrir o XWayland:
+  verifique se "echo $DISPLAY" retorna algo na sua sessão.
+
 SEGURANCA DOS ARQUIVOS
 ----------------------
 
