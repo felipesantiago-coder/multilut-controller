@@ -25,7 +25,9 @@ USER_DESKTOP_FILE="$USER_DESKTOP/MultiLUT_Controller.desktop"
 mkdir -p "$APP_DIR" "$DESKTOP_DIR" "$ICON_DIR"
 cp -a "$SOURCE_DIR/." "$APP_DIR/"
 chmod 755 "$APP_DIR/run.sh" "$APP_DIR/install.sh" "$APP_DIR/uninstall.sh"
-chmod 644 "$APP_DIR/multilut_controller.py" "$APP_DIR/multilut_core.py"
+chmod 644 "$APP_DIR/multilut_controller.py" "$APP_DIR/multilut_core.py" \
+  "$APP_DIR/multilut_aim.py" "$APP_DIR/multilut_trainer.py" \
+  "$APP_DIR/multilut_overlay.py"
 
 sed "s|@APP_DIR@|$APP_DIR|g" \
   "$SOURCE_DIR/com.felipesantiago.MultiLUTController.desktop.in" \
