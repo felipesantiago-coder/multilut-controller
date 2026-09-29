@@ -724,9 +724,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         subtitle = Gtk.Label(
             label=(
                 "Gera um theater nativo do Insurgency (scripts/theaters/multilut_zoom.theater) "
-                "que aumenta a ampliação das lunetas selecionadas — a luneta 7x pode chegar "
-                "a 12x. O mecanismo é o oficial do jogo (mp_theater_override): nenhum arquivo "
-                "original é alterado e desfazer é instantâneo."
+                "que aumenta a ampliação das lunetas selecionadas até 12x, com opções "
+                "rápidas de 3x, 5x, 10x e 12x. O mecanismo é o oficial do jogo "
+                "(mp_theater_override): nenhum arquivo original é alterado e desfazer é "
+                "instantâneo."
             ),
             xalign=0,
             wrap=True,
@@ -806,6 +807,19 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         target_row.append(self.target_value_label)
         settings_inner.append(target_row)
 
+        preset_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        preset_label = Gtk.Label(label="Opções rápidas", xalign=0)
+        preset_label.set_size_request(190, -1)
+        preset_row.append(preset_label)
+        presets_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for mag in scopes.QUICK_TARGETS:
+            button = Gtk.Button(label=f"{mag:g}x")
+            button.add_css_class("pill")
+            button.connect("clicked", self.on_scopes_preset, mag)
+            presets_box.append(button)
+        preset_row.append(presets_box)
+        settings_inner.append(preset_row)
+
         optics_caption = Gtk.Label(label="Lunetas a ampliar", xalign=0)
         optics_caption.add_css_class("category-label")
         settings_inner.append(optics_caption)
@@ -865,6 +879,11 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
     def on_scopes_target_changed(self, _scale) -> None:
         self.target_value_label.set_label(f"{self.target_scale.get_value():g}x")
+
+    def on_scopes_preset(self, _button, mag: float) -> None:
+        """Atalho de ampliação (3x, 5x, 10x, 12x): ajusta e grava a preferência."""
+        self.target_scale.set_value(mag)
+        self._persist_scopes_config()
 
     def _selected_optics(self) -> list[str]:
         return [

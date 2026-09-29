@@ -220,5 +220,17 @@ class NormalizeConfigTests(unittest.TestCase):
         self.assertEqual(data["game_dir"], "/jogos/insurgency")
 
 
+class QuickTargetsTests(unittest.TestCase):
+    def test_contains_requested_options(self):
+        self.assertEqual(
+            scopes.QUICK_TARGETS, (3.0, 5.0, 10.0, scopes.MAX_TARGET)
+        )
+
+    def test_all_within_valid_range(self):
+        for mag in scopes.QUICK_TARGETS:
+            self.assertGreaterEqual(mag, scopes.MIN_TARGET)
+            self.assertLessEqual(mag, scopes.MAX_TARGET)
+
+
 if __name__ == "__main__":
     unittest.main()

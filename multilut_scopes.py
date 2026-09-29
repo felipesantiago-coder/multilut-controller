@@ -30,6 +30,7 @@ from multilut_core import MultiLUTError, _atomic_write
 NOMINAL_BASE = 7.0                # luneta 7x tem fov_wpn_scope = 10 (70/10)
 MAX_TARGET = 12.0                 # limite pedido pelo usuário
 MIN_TARGET = 1.0
+QUICK_TARGETS = (3.0, 5.0, 10.0, 12.0)  # opções rápidas de ampliação
 THEATER_NAME = "multilut_zoom"
 AUTOEXEC_BEGIN = "// >>> MultiLUT Controller - lunetas ampliadas >>>"
 AUTOEXEC_END = "// <<< MultiLUT Controller - lunetas ampliadas <<<"
