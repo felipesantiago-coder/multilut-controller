@@ -289,5 +289,23 @@ class FindGameDirsWithoutScriptsTests(unittest.TestCase):
             self.assertTrue((game / "scripts" / "theaters").is_dir())
 
 
+class FindGameDirAboveTests(unittest.TestCase):
+    def test_resolves_download_scripts_to_game_dir(self):
+        # Caminho real relatado por um usuário: scripts solto dentro de download/
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp) / "insurgency2" / "insurgency"
+            (game / "download" / "scripts").mkdir(parents=True)
+            (game / "maps").mkdir()
+            (game / "cfg").mkdir()
+            found = scopes.find_game_dir_above(game / "download" / "scripts")
+            self.assertEqual(found, game)
+
+    def test_none_when_outside_any_game(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deep = Path(tmp) / "a" / "b" / "c" / "d" / "e" / "f"
+            deep.mkdir(parents=True)
+            self.assertIsNone(scopes.find_game_dir_above(deep))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -592,6 +592,20 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.toast(f"O caminho informado não é uma pasta: {candidate}", 6)
             return
         if not scopes.looks_like_game_dir(candidate):
+            inside = scopes.find_game_dir_above(candidate)
+            if inside is not None:
+                self.config["scopes"]["game_dir"] = str(inside)
+                try:
+                    core.save_config(self.config)
+                except (OSError, core.MultiLUTError) as exc:
+                    self.toast(f"Não foi possível salvar o caminho: {exc}", 6)
+                    return
+                self.refresh_scopes_page()
+                self.toast(
+                    f"Essa pasta não é a do jogo, mas encontrei a instalação em: {inside}",
+                    7,
+                )
+                return
             self.toast(
                 "Essa pasta existe, mas não reconheci a instalação do jogo: "
                 "faltam subpastas típicas (maps, cfg, scripts…).", 7

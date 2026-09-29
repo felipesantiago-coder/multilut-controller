@@ -185,6 +185,20 @@ def looks_like_game_dir(path: Path | str) -> bool:
     return markers >= 2 or candidate.name.casefold() == "insurgency"
 
 
+def find_game_dir_above(path: Path | str, max_levels: int = 5) -> Path | None:
+    """Se o caminho está DENTRO da pasta do jogo, devolve a pasta do jogo.
+
+    Útil quando o usuário aponta para uma subpasta como
+    insurgency/download/scripts — a pasta do jogo fica alguns níveis acima.
+    """
+    current = Path(path)
+    for _ in range(max_levels):
+        current = current.parent
+        if looks_like_game_dir(current):
+            return current
+    return None
+
+
 def _validate_game_dir(game_dir: Path | str) -> Path:
     path = Path(game_dir)
     if not path.is_dir():
