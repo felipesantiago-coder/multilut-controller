@@ -23,6 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import re
+import subprocess
 
 from multilut_core import MultiLUTError, _atomic_write
 
@@ -35,6 +36,9 @@ THEATER_NAME = "multilut_zoom"
 AUTOEXEC_BEGIN = "// >>> MultiLUT Controller - lunetas ampliadas >>>"
 AUTOEXEC_END = "// <<< MultiLUT Controller - lunetas ampliadas <<<"
 AUTOEXEC_LINE = f'mp_theater_override "{THEATER_NAME}"'
+
+STEAM_APP_ID = "222880"           # Insurgency na Steam
+LAUNCH_OPTION = f"+mp_theater_override {THEATER_NAME}"
 
 STEAM_ROOTS = (
     "~/.local/share/Steam",
@@ -59,6 +63,26 @@ SCOPED_OPTICS: tuple[tuple[str, str, float, float, float, float], ...] = (
 OPTIC_BY_ID = {item[0]: item for item in SCOPED_OPTICS}
 DEFAULT_OPTICS = ("optic_scope_7x", "optic_scope_mk4")
 
+# No dump oficial, algumas ópticas definem fov_wpn_scope DENTRO de sub-blocos
+# por arma ("weapon_mosin" etc.) dentro de optics_fov_override. No merge do
+# theater esses valores por arma vencem o de nível superior — o override só
+# no topo não muda nada para elas (bug da 1ª versão: 7x e MK4 sem efeito).
+# Só 7x e MK4 definem fov_wpn_scope por arma; nas demais os sub-blocos
+# trazem apenas ironsight/focus e o valor de nível superior vale.
+OPTIC_WEAPON_FOVS: dict[str, tuple[tuple[str, float], ...]] = {
+    "optic_scope_7x": (
+        ("weapon_mosin", 10.0),
+        ("weapon_fal", 10.0),
+        ("weapon_l1a1", 10.0),
+        ("weapon_sks", 10.0),
+    ),
+    "optic_scope_mk4": (
+        ("weapon_m40a1", 10.0),
+        ("weapon_m14", 10.0),
+        ("weapon_m16a4", 10.0),
+    ),
+}
+
 # Encadeamento idêntico ao default.theater do jogo: o override precisa
 # carregar as mesmas bases para não perder player/gear/armas.
 THEATER_BASE_CHAIN: tuple[str, ...] = (
@@ -77,6 +101,7 @@ def normalize_scope_config(raw: dict | None) -> dict:
         "target": MAX_TARGET,
         "optics": list(DEFAULT_OPTICS),
         "autoexec": True,
+        "launch_option": True,
         "game_dir": None,
     }
     if not isinstance(raw, dict):
@@ -94,6 +119,7 @@ def normalize_scope_config(raw: dict | None) -> dict:
         if valid:
             result["optics"] = valid
     result["autoexec"] = bool(raw.get("autoexec", True))
+    result["launch_option"] = bool(raw.get("launch_option", True))
     game_dir = raw.get("game_dir")
     if isinstance(game_dir, str) and game_dir.strip():
         result["game_dir"] = game_dir.strip()
@@ -153,6 +179,19 @@ def build_theater(target_mag: float, optic_ids: list[str] | tuple[str, ...]) -> 
             f'\t\t\t\t"fov_wpn_scope"\t\t\t\t"{new_scope}"',
             f'\t\t\t\t"fov_wpn_ironsight"\t\t\t"{_format_fov(ironsight)}"',
             f'\t\t\t\t"fov_wpn_focus"\t\t\t\t"{_format_fov(focus)}"',
+        ]
+        # Armas com fov_wpn_scope próprio no dump: sem isto o jogo ignora
+        # o valor de nível superior e a luneta fica sem ampliação extra.
+        for weapon_id, weapon_fov in OPTIC_WEAPON_FOVS.get(optic_id, ()):
+            weapon_zoom = _format_fov(compute_scope_fov(weapon_fov, mag, target))
+            lines += [
+                "",
+                f'\t\t\t\t"{weapon_id}"',
+                "\t\t\t\t{",
+                f'\t\t\t\t\t"fov_wpn_scope"\t\t\t\t"{weapon_zoom}"',
+                "\t\t\t\t}",
+            ]
+        lines += [
             "\t\t\t}",
             "\t\t}",
             "",
@@ -303,6 +342,195 @@ def set_autoexec_zoom(game_dir: Path | str, enabled: bool) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(path, new_text, mode)
     return path
+
+
+# --- Opção de inicialização do Steam (+mp_theater_override) -----------------
+#
+# O autoexec.cfg do Insurgency (2014) é executado de forma pouco confiável
+# (há relatos antigos e guias que mandam usar "-exec autoexec.cfg"), e o cvar
+# mp_theater_override não é ARCHIVE, ou seja, não persiste no config.cfg.
+# O caminho canônico e garantido é a opção de inicialização do jogo na Steam:
+# +mp_theater_override multilut_zoom — vale para coop e PvP hospedados localmente.
+
+_LAUNCH_PAIR = re.compile(r"\+mp_theater_override\s+\S+")
+
+
+def steam_running() -> bool:
+    """True se houver processo do Steam ativo (ele regravaria localconfig.vdf)."""
+    for name in ("steam", "steam.exe"):
+        try:
+            probe = subprocess.run(
+                ["pgrep", "-x", name], capture_output=True, check=False
+            )
+        except (OSError, ValueError):
+            continue
+        if probe.returncode == 0:
+            return True
+    return False
+
+
+def localconfig_candidates(
+    roots: list[Path | str] | None = None,
+) -> list[Path]:
+    """Arquivos localconfig.vdf do Steam (principal + userdata), sem duplicatas."""
+    if roots is None:
+        roots = []
+        for pattern in STEAM_ROOTS:
+            expanded = Path(os.path.expanduser(pattern))
+            if expanded.is_dir():
+                roots.append(expanded)
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        root = Path(root)
+        candidates = [root / "config" / "localconfig.vdf"]
+        userdata = root / "userdata"
+        if userdata.is_dir():
+            candidates.extend(sorted(userdata.glob("*/config/localconfig.vdf")))
+        for path in candidates:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                resolved = path
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            files.append(path)
+    return files
+
+
+def _app_block_span(text: str, app_id: str) -> tuple[int, int] | None:
+    """Localiza o bloco VDF do app: devolve (índice do '{', índice do '}')."""
+    key = f'"{app_id}"'
+    search_from = 0
+    while True:
+        idx = text.find(key, search_from)
+        if idx == -1:
+            return None
+        search_from = idx + len(key)
+        rest = text[search_from:]
+        stripped = rest.lstrip()
+        if not stripped.startswith("{"):
+            continue
+        brace = search_from + (len(rest) - len(stripped))
+        break
+    depth = 0
+    in_quote = False
+    i = brace
+    while i < len(text):
+        char = text[i]
+        if in_quote:
+            if char == "\\":
+                i += 2
+                continue
+            if char == '"':
+                in_quote = False
+        elif char == '"':
+            in_quote = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return brace, i
+        i += 1
+    return None
+
+
+def _patch_launch_options_text(text: str, enable: bool) -> tuple[str, bool]:
+    """Adiciona/remove a opção de inicialização no texto do localconfig.vdf."""
+    span = _app_block_span(text, STEAM_APP_ID)
+    if span is None:
+        return text, False
+    start, end = span
+    block = text[start:end + 1]
+    match = re.search(r'"LaunchOptions"\s+"([^"]*)"', block)
+    if match:
+        value = match.group(1)
+        if enable:
+            if _LAUNCH_PAIR.search(value):
+                new_value = _LAUNCH_PAIR.sub(LAUNCH_OPTION, value, count=1)
+            else:
+                new_value = f"{value} {LAUNCH_OPTION}".strip()
+        else:
+            new_value = _LAUNCH_PAIR.sub("", value).strip()
+        if new_value == value:
+            return text, False
+        replacement = f'"LaunchOptions"\t\t"{new_value}"'
+        new_block = block.replace(match.group(0), replacement, 1)
+        return text[:start] + new_block + text[end + 1:], True
+    if not enable:
+        return text, False
+    insertion = f'\n\t\t"LaunchOptions"\t\t"{LAUNCH_OPTION}"'
+    new_block = block[:1] + insertion + block[1:]
+    return text[:start] + new_block + text[end + 1:], True
+
+
+def _launch_option_in_text(text: str) -> bool:
+    span = _app_block_span(text, STEAM_APP_ID)
+    if span is None:
+        return False
+    block = text[span[0]:span[1] + 1]
+    match = re.search(r'"LaunchOptions"\s+"([^"]*)"', block)
+    if not match:
+        return False
+    return bool(re.search(r"\+mp_theater_override\s+multilut_zoom\b", match.group(1)))
+
+
+def launch_option_installed(roots: list[Path | str] | None = None) -> bool:
+    """True se algum localconfig.vdf já inicia o jogo com o theater ampliado."""
+    for path in localconfig_candidates(roots):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _launch_option_in_text(text):
+            return True
+    return False
+
+
+def set_launch_option(
+    enable: bool, roots: list[Path | str] | None = None
+) -> list[Path]:
+    """Grava ou remove a opção de inicialização do Insurgency na Steam.
+
+    Retorna a lista de arquivos alterados. Exige o Steam fechado: com o
+    Steam aberto a configuração fica em memória e seria regravada sem a opção.
+    """
+    if steam_running():
+        raise MultiLUTError(
+            "o Steam está aberto e regravaria a configuração — "
+            "feche o Steam e clique em Ativar novamente"
+        )
+    candidates = localconfig_candidates(roots)
+    if enable and not candidates:
+        raise MultiLUTError(
+            "não encontrei os arquivos de configuração do Steam (localconfig.vdf)"
+        )
+    changed_paths: list[Path] = []
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            mode = path.stat().st_mode & 0o777
+        except OSError:
+            continue
+        new_text, changed = _patch_launch_options_text(text, enable)
+        if not changed:
+            continue
+        backup = path.with_name(path.name + ".multilut.bak")
+        if not backup.exists():
+            try:
+                backup.write_text(text, encoding="utf-8")
+            except OSError:
+                pass
+        try:
+            _atomic_write(path, new_text, mode)
+        except OSError as exc:
+            raise MultiLUTError(
+                f"não foi possível gravar {path}: {exc}"
+            ) from exc
+        changed_paths.append(path)
+    return changed_paths
 
 
 def find_game_dirs(roots: list[Path | str] | None = None) -> list[Path]:

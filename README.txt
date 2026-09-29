@@ -93,7 +93,7 @@ LUNETAS AMPLIADAS (ATE 12X)
 A aba "Lunetas" aumenta a ampliação das lunetas do Insurgency usando o
 mecanismo oficial de theaters: o aplicativo gera o arquivo
 scripts/theaters/multilut_zoom.theater dentro da pasta do jogo e aponta
-mp_theater_override para ele (via autoexec.cfg ou comando no console).
+mp_theater_override para ele.
 
 COMO FUNCIONA:
 
@@ -101,9 +101,27 @@ COMO FUNCIONA:
   quanto menor o FOV, maior o zoom. A luneta "7x" usa FOV 10.
 - Para 12x, o aplicativo grava FOV 5.83 (10 x 7/12) nas lunetas
   selecionadas. Lunetas 1x (red dots) não são alteradas.
+- O override cobre também os sub-blocos por arma (weapon_mosin,
+  weapon_fal, weapon_m40a1…) que o theater oficial define dentro de
+  optics_fov_override — sem isso o jogo ignora o FOV novo e a luneta
+  fica sem ampliação extra.
 - Nenhum VPK ou arquivo original do jogo é modificado: o theater é um
-  arquivo novo, e restaurar o padrão é apagar o arquivo e a linha do
-  autoexec (o botão "Restaurar padrão do jogo" faz os dois).
+  arquivo novo, e restaurar o padrão é apagar o arquivo, a linha do
+  autoexec e a opção de inicialização (o botão "Restaurar padrão do
+  jogo" faz os três).
+
+ATIVAÇÃO (mp_theater_override não fica salvo entre sessões):
+
+1. Opção de inicialização do Steam (garantido, recomendado): o aplicativo
+   grava +mp_theater_override multilut_zoom nas opções de inicialização do
+   jogo. Requer o Steam fechado na hora de aplicar (o Steam regrava o
+   localconfig.vdf ao sair); um backup localconfig.vdf.multilut.bak é criado
+   na primeira alteração.
+2. autoexec.cfg: o bloco gravado no cfg/autoexec.cfg do jogo ativa sozinho
+   — mas o Insurgency (2014) nem sempre executa o autoexec.cfg, por isso a
+   opção 1 é a mais confiável.
+3. Console do jogo (manual): abra o console e digite
+   mp_theater_override multilut_zoom antes de carregar o mapa.
 
 OPÇÕES DE AMPLIAÇÃO:
 
@@ -121,8 +139,9 @@ LUNETAS DISPONÍVEIS:
 
 ONDE VALE E JOGO JUSTO:
 
-- O theater é carregado quando VOCÊ hospeda a partida: coop, prática ou
-  servidor próprio. Reinicie o jogo depois de ativar.
+- O theater é carregado quando VOCÊ hospeda a partida: coop (Checkpoint,
+  Survival…), PvP com bots ou servidor próprio — em qualquer modo local,
+  depois de reiniciar o jogo com a ativação feita.
 - Em servidores de terceiros o theater é definido pelo servidor, então
   o ajuste não se aplica lá. Respeite as regras do servidor ou torneio.
 - O recurso usa apenas arquivos de configuração suportados pelo jogo:

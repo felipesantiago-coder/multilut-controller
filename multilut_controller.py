@@ -487,6 +487,26 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         autoexec_row.append(autoexec_label)
         autoexec_row.append(self.scopes_autoexec_switch)
         settings_inner.append(autoexec_row)
+
+        launch_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        launch_label = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        launch_title = Gtk.Label(label="Ativar pela opção de inicialização do Steam", xalign=0)
+        launch_hint = Gtk.Label(
+            label="Grava +mp_theater_override multilut_zoom nas opções de "
+            "inicialização do jogo (método garantido; requer Steam fechado)",
+            xalign=0,
+        )
+        launch_hint.add_css_class("category-label")
+        launch_label.append(launch_title)
+        launch_label.append(launch_hint)
+        launch_label.set_hexpand(True)
+        self.scopes_launch_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.scopes_launch_switch.set_active(
+            bool(self.config["scopes"].get("launch_option", True))
+        )
+        launch_row.append(launch_label)
+        launch_row.append(self.scopes_launch_switch)
+        settings_inner.append(launch_row)
         settings_card.append(settings_inner)
         content.append(settings_card)
 
@@ -506,9 +526,11 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         note = Gtk.Label(
             label=(
-                "Ativação manual (sem autoexec): abra o console do jogo e digite "
-                "mp_theater_override multilut_zoom antes de carregar o mapa. A mudança "
-                "vale na próxima partida hospedada por você."
+                "Como funciona: o jogo carrega o theater multilut_zoom quando o cvar "
+                "mp_theater_override está definido — pela opção de inicialização do "
+                "Steam (garantido), pelo autoexec.cfg (quando o jogo o executa) ou "
+                "manualmente pelo console: mp_theater_override multilut_zoom. Vale na "
+                "próxima partida hospedada por você (coop, prática ou servidor próprio)."
             ),
             xalign=0,
             wrap=True,
@@ -538,6 +560,9 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.config["scopes"]["target"] = self.target_scale.get_value()
         self.config["scopes"]["optics"] = self._selected_optics()
         self.config["scopes"]["autoexec"] = bool(self.scopes_autoexec_switch.get_active())
+        self.config["scopes"]["launch_option"] = bool(
+            self.scopes_launch_switch.get_active()
+        )
         try:
             core.save_config(self.config)
         except (OSError, core.MultiLUTError) as exc:
@@ -642,10 +667,19 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         except (OSError, core.MultiLUTError) as exc:
             self.toast(f"Não foi possível aplicar: {exc}", 8)
             return
+        launch_warning = ""
+        try:
+            scopes.set_launch_option(
+                bool(self.scopes_launch_switch.get_active())
+            )
+        except (OSError, core.MultiLUTError) as exc:
+            launch_warning = f" Opção de inicialização não aplicada: {exc}"
         self._persist_scopes_config()
         self.refresh_scopes_page()
         self.toast(
-            f"Lunetas ampliadas para {target:g}x. Reinicie o jogo para valer.", 8
+            f"Lunetas ampliadas para {target:g}x. Reinicie o jogo para valer."
+            f"{launch_warning}",
+            8,
         )
 
     def on_scopes_revert(self, _button) -> None:
@@ -654,6 +688,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             return
         try:
             changed = scopes.revert_zoom(self.scopes_game_dir)
+            scopes.set_launch_option(False)
         except (OSError, core.MultiLUTError) as exc:
             self.toast(f"Não foi possível restaurar: {exc}", 8)
             return

@@ -55,6 +55,30 @@ class BuildTheaterTests(unittest.TestCase):
         self.assertIn('"fov_wpn_focus"\t\t\t\t"43"', text)
         self.assertIn('"optic_scope_7x"', text)
 
+    def test_per_weapon_scope_blocks_at_twelve(self):
+        """Armas com fov_wpn_scope próprio precisam do override por arma."""
+        text = scopes.build_theater(12.0, ["optic_scope_7x", "optic_scope_mk4"])
+        for optic_id in ("optic_scope_7x", "optic_scope_mk4"):
+            for weapon_id, _fov in scopes.OPTIC_WEAPON_FOVS[optic_id]:
+                self.assertIn(f'"{weapon_id}"', text, weapon_id)
+        # todas as 7 armas recebem o mesmo FOV escalado (10 * 7/12 = 5.83);
+        # linhas por arma têm 5 tabs de recuo, o topo tem 4
+        self.assertEqual(
+            text.count('\t\t\t\t\t"fov_wpn_scope"\t\t\t\t"5.83"'), 7
+        )
+
+    def test_per_weapon_scale_follows_target(self):
+        # 10 * (7/3) = 23.33 -> per-weapon acompanha o alvo
+        text = scopes.build_theater(3.0, ["optic_scope_7x"])
+        self.assertIn('\t\t\t\t\t"fov_wpn_scope"\t\t\t\t"23.33"', text)
+
+    def test_optics_without_per_weapon_scope_have_no_weapon_block(self):
+        # Elcan/PO/Aimpoint não definem fov_wpn_scope por arma no dump
+        text = scopes.build_theater(12.0, ["optic_elcan", "optic_po4x24",
+                                           "optic_2xaimpoint"])
+        self.assertNotIn('"weapon_mosin"', text)
+        self.assertNotIn('"weapon_m40a1"', text)
+
     def test_integer_fov_format(self):
         # Elcan 14 * (4/8) = 7 -> inteiro sem casas decimais
         text = scopes.build_theater(8.0, ["optic_elcan"])
@@ -165,6 +189,113 @@ class AutoexecTests(unittest.TestCase):
         self.assertFalse(scopes.autoexec_zoom_enabled(self.game))
 
 
+class LaunchOptionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.steam = Path(self.tmp.name) / "steam"
+        (self.steam / "config").mkdir(parents=True)
+        self.localconfig = self.steam / "config" / "localconfig.vdf"
+        # desliga a checagem real de processos do Steam nos testes
+        self._original_running = scopes.steam_running
+        scopes.steam_running = lambda: False
+
+    def tearDown(self):
+        scopes.steam_running = self._original_running
+        self.tmp.cleanup()
+
+    def write_localconfig(self, text: str) -> None:
+        self.localconfig.write_text(text, encoding="utf-8")
+
+    APP_TEMPLATE = (
+        '"Software"\n{\n\t"Valve"\n\t{\n\t\t"Steam"\n\t\t{\n'
+        '\t\t\t"apps"\n\t\t\t{\n\t\t\t\t"222880"\n\t\t\t\t{\n'
+        '%s\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n'
+    )
+
+    def test_inserts_when_key_missing(self):
+        self.write_localconfig(self.APP_TEMPLATE % "")
+        changed = scopes.set_launch_option(True, roots=[self.steam])
+        self.assertEqual(changed, [self.localconfig])
+        text = self.localconfig.read_text(encoding="utf-8")
+        self.assertIn(scopes.LAUNCH_OPTION, text)
+        self.assertTrue(scopes.launch_option_installed(roots=[self.steam]))
+
+    def test_appends_to_existing_options(self):
+        self.write_localconfig(
+            self.APP_TEMPLATE % '\t\t\t\t       "LaunchOptions"         "-novid -condebug"\n'
+        )
+        scopes.set_launch_option(True, roots=[self.steam])
+        text = self.localconfig.read_text(encoding="utf-8")
+        self.assertIn('-novid -condebug ' + scopes.LAUNCH_OPTION, text)
+
+    def test_replaces_existing_theater_override(self):
+        self.write_localconfig(
+            self.APP_TEMPLATE % '\t\t\t\t       "LaunchOptions"         "+mp_theater_override outro"\n'
+        )
+        scopes.set_launch_option(True, roots=[self.steam])
+        text = self.localconfig.read_text(encoding="utf-8")
+        self.assertIn(scopes.LAUNCH_OPTION, text)
+        self.assertNotIn("outro", text)
+
+    def test_add_is_idempotent(self):
+        self.write_localconfig(self.APP_TEMPLATE % "")
+        scopes.set_launch_option(True, roots=[self.steam])
+        first = self.localconfig.read_text(encoding="utf-8")
+        changed = scopes.set_launch_option(True, roots=[self.steam])
+        self.assertEqual(changed, [])
+        self.assertEqual(first, self.localconfig.read_text(encoding="utf-8"))
+
+    def test_remove_keeps_other_options(self):
+        self.write_localconfig(
+            self.APP_TEMPLATE
+            % ('\t\t\t\t"LaunchOptions"\t\t"-novid %s"\n' % scopes.LAUNCH_OPTION)
+        )
+        changed = scopes.set_launch_option(False, roots=[self.steam])
+        self.assertEqual(changed, [self.localconfig])
+        text = self.localconfig.read_text(encoding="utf-8")
+        self.assertNotIn("mp_theater_override", text)
+        self.assertIn("-novid", text)
+        self.assertFalse(scopes.launch_option_installed(roots=[self.steam]))
+
+    def test_file_without_app_block_is_untouched(self):
+        self.write_localconfig('"Software"\n{\n\t"Valve"\n\t{\n\t}\n}\n')
+        changed = scopes.set_launch_option(True, roots=[self.steam])
+        self.assertEqual(changed, [])
+        self.assertFalse(scopes.launch_option_installed(roots=[self.steam]))
+
+    def test_userdata_localconfigs_are_patched(self):
+        user_cfg = self.steam / "userdata" / "12345" / "config"
+        user_cfg.mkdir(parents=True)
+        user_file = user_cfg / "localconfig.vdf"
+        user_file.write_text(self.APP_TEMPLATE % "", encoding="utf-8")
+        self.write_localconfig(self.APP_TEMPLATE % "")
+        changed = scopes.set_launch_option(True, roots=[self.steam])
+        self.assertIn(self.localconfig, changed)
+        self.assertIn(user_file, changed)
+        self.assertTrue(scopes.launch_option_installed(roots=[self.steam]))
+
+    def test_backup_is_created(self):
+        original = self.APP_TEMPLATE % ""
+        self.write_localconfig(original)
+        scopes.set_launch_option(True, roots=[self.steam])
+        backup = self.localconfig.with_name(
+            self.localconfig.name + ".multilut.bak"
+        )
+        self.assertTrue(backup.is_file())
+        self.assertEqual(backup.read_text(encoding="utf-8"), original)
+
+    def test_refuses_when_steam_is_running(self):
+        scopes.steam_running = lambda: True
+        self.write_localconfig(self.APP_TEMPLATE % "")
+        with self.assertRaises(MultiLUTError):
+            scopes.set_launch_option(True, roots=[self.steam])
+        # nada foi gravado
+        self.assertEqual(
+            self.localconfig.read_text(encoding="utf-8"),
+            self.APP_TEMPLATE % "",
+        )
+
+
 class FindGameDirsTests(unittest.TestCase):
     def test_finds_install_under_steam_root(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -200,6 +331,7 @@ class NormalizeConfigTests(unittest.TestCase):
         self.assertEqual(data["target"], scopes.MAX_TARGET)
         self.assertEqual(tuple(data["optics"]), scopes.DEFAULT_OPTICS)
         self.assertTrue(data["autoexec"])
+        self.assertTrue(data["launch_option"])
 
     def test_clamps_target(self):
         data = scopes.normalize_scope_config({"target": 99})
