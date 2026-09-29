@@ -100,6 +100,11 @@ class X11Bridge:
                 ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long, ctypes.c_void_p
             ]
             self.xlib.XFlush.argtypes = [ctypes.c_void_p]
+            self.xlib.XMoveResizeWindow.restype = ctypes.c_int
+            self.xlib.XMoveResizeWindow.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+                ctypes.c_uint, ctypes.c_uint,
+            ]
             self.xext.XShapeCombineRectangles.restype = ctypes.c_int
             self.xext.XShapeCombineRectangles.argtypes = [
                 ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_int,
@@ -122,6 +127,16 @@ class X11Bridge:
         )
         self.xlib.XFlush(self.display)
         return result != 0
+
+    def move_resize(self, xid: int, x: int, y: int, width: int, height: int) -> bool:
+        """Geometria explícita da janela, sem depender do fullscreen do WM."""
+        if not self.available:
+            return False
+        self.xlib.XMoveResizeWindow(
+            self.display, xid, int(x), int(y), int(width), int(height)
+        )
+        self.xlib.XFlush(self.display)
+        return True
 
     def request_states(self, xid: int, states: list[str]) -> bool:
         """Envia _NET_WM_STATE (sempre acima, sem barra de tarefas/pager)."""
@@ -155,10 +170,13 @@ class OverlayWindow(Gtk.ApplicationWindow):
         self.parent_pid = parent_pid
         self.x11 = X11Bridge()
         self.config_monitor = None
+        self.monitor_geometry: tuple[int, int, int, int] | None = None
 
         self.set_title("MultiLUT Overlay")
         self.set_decorated(False)
-        self.set_resizable(False)
+        # Redimensionável de verdade: sem dicas de tamanho fixo, o GTK aceita a
+        # geometria grande imposta pelo X11 em vez de brigar de volta com ela.
+        self.set_resizable(True)
         try:
             self.set_focusable(False)  # WM_HINTS input=false: nunca recebe foco
         except AttributeError:
@@ -208,6 +226,12 @@ class OverlayWindow(Gtk.ApplicationWindow):
             if monitors is None or monitors.get_n_items() == 0:
                 return
             monitor = monitors.get_item(0)
+        geometry = monitor.get_geometry()
+        if geometry is not None:
+            self.monitor_geometry = (
+                int(geometry.x), int(geometry.y),
+                int(geometry.width), int(geometry.height),
+            )
         try:
             self.fullscreen_on_monitor(monitor)
         except (AttributeError, TypeError):
@@ -219,15 +243,28 @@ class OverlayWindow(Gtk.ApplicationWindow):
             seat = display.get_default_seat()
             pointer = seat.get_pointer()
             result = pointer.get_position()
-            if isinstance(result, tuple) and len(result) == 3:
+            if not isinstance(result, tuple):
+                return None
+            if len(result) == 4:      # (ok, surface, x, y)
+                _ok, _surface, x, y = result
+            elif len(result) == 3:    # (surface, x, y)
                 _surface, x, y = result
-            elif isinstance(result, tuple) and len(result) == 2:
+            elif len(result) == 2:    # (x, y)
                 x, y = result
             else:
                 return None
             return display.get_monitor_at_point(float(x), float(y))
         except (AttributeError, TypeError, ValueError):
             return None
+
+    def enforce_geometry(self, xid: int) -> None:
+        """Impõe a geometria do monitor via X11: centro da janela = centro da tela."""
+        if self.monitor_geometry is None:
+            return
+        mx, my, mw, mh = self.monitor_geometry
+        if mw <= 0 or mh <= 0:
+            return
+        self.x11.move_resize(xid, mx, my, mw, mh)
 
     def reapply_x11_hacks(self) -> bool:
         surface = self.get_surface()
@@ -242,6 +279,7 @@ class OverlayWindow(Gtk.ApplicationWindow):
                 file=sys.stderr,
             )
             return GLib.SOURCE_REMOVE
+        self.enforce_geometry(int(xid))
         self.x11.make_input_transparent(int(xid))
         self.x11.request_states(
             int(xid),
