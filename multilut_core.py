@@ -148,6 +148,42 @@ def app_config_path() -> Path:
     return Path.home() / ".config/multilut-controller/config.json"
 
 
+def app_state_dir() -> Path:
+    """Estado do aplicativo (XDG_STATE_HOME), ex.: ~/.local/state/multilut-controller."""
+    root = os.environ.get("XDG_STATE_HOME", "").strip()
+    base = Path(root).expanduser() if root else Path.home() / ".local/state"
+    return base / "multilut-controller"
+
+
+def legacy_history_path() -> Path:
+    """Caminho antigo do histórico (versões anteriores ao XDG_STATE_HOME)."""
+    return Path.home() / ".config/multilut-controller/history.jsonl"
+
+
+def history_path() -> Path:
+    """Histórico local: XDG_STATE_HOME (o arquivo legado é migrado na 1ª escrita)."""
+    return app_state_dir() / "history.jsonl"
+
+
+def _migrate_legacy_history() -> Path:
+    """Move o histórico legado de ~/.config para XDG_STATE_HOME (idempotente).
+
+    Versões antigas gravavam em ~/.config/multilut-controller/history.jsonl;
+    se o arquivo novo ainda não existir, o legado é movido inteiro. Se a
+    movimentação falhar (sistema de arquivos), o legado continua sendo lido.
+    """
+    target = history_path()
+    legacy = legacy_history_path()
+    if not legacy.is_file() or target.exists():
+        return target
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        legacy.replace(target)
+    except OSError:
+        pass
+    return target if target.exists() else legacy
+
+
 def _resolved_file(path: Path | str) -> Path:
     candidate = Path(path).expanduser()
     try:
@@ -357,13 +393,9 @@ def profile_names(profiles: Iterable[Profile] = PROFILES) -> list[str]:
 
 
 # ------------------------------------------------------------ histórico de sessões
-def history_path() -> Path:
-    return Path.home() / ".config/multilut-controller/history.jsonl"
-
-
 def append_history(entry: dict) -> None:
     """Registra um evento (perfil aplicado) no histórico local (JSONL)."""
-    path = history_path()
+    path = _migrate_legacy_history()
     path.parent.mkdir(parents=True, exist_ok=True)
     record = dict(entry)
     record.setdefault(
@@ -394,7 +426,7 @@ def _trim_history(path: Path, keep: int = 1000, max_lines: int = 2000) -> None:
 
 def read_history(limit: int = 100) -> list[dict]:
     """Entradas mais recentes primeiro (mais novas no fim da leitura)."""
-    path = history_path()
+    path = _migrate_legacy_history()
     if not path.is_file():
         return []
     try:
@@ -419,7 +451,7 @@ def read_history(limit: int = 100) -> list[dict]:
 
 def clear_history() -> None:
     try:
-        history_path().unlink()
+        _migrate_legacy_history().unlink()
     except FileNotFoundError:
         return
     except OSError:
