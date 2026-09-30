@@ -25,6 +25,7 @@ except (ImportError, ValueError) as exc:
     raise SystemExit(2) from exc
 
 import multilut_core as core
+import multilut_extra as extra
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -318,6 +319,11 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.build_history_page(), "history", "Histórico"
         )
         page_history.set_icon_name("document-open-recent-symbolic")
+        page_system = self.view_stack.add_titled(
+            self.build_system_page(), "system", "Sistema"
+        )
+        page_system.set_icon_name("emblem-system-symbolic")
+        self.view_stack.connect("notify::visible-child", self.on_visible_page_changed)
         body.append(self.view_stack)
 
         toolbar.set_content(body)
@@ -846,6 +852,279 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         core.clear_history()
         self.refresh_history()
         self.toast("Histórico local apagado.")
+
+    # ------------------------------------------------------------ página Sistema
+    STATE_ICONS = {
+        "ok": "emblem-ok-symbolic",
+        "warn": "dialog-warning-symbolic",
+        "fail": "dialog-error-symbolic",
+        "info": "dialog-information-symbolic",
+    }
+    STATE_CLASSES = {
+        "ok": "success",
+        "warn": "warning",
+        "fail": "warning",
+        "info": "muted",
+    }
+
+    def build_system_page(self) -> Gtk.Widget:
+        """Página com diagnóstico, instalações Steam e backup do aplicativo."""
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        page.set_margin_start(26)
+        page.set_margin_end(26)
+        page.set_margin_top(20)
+        page.set_margin_bottom(20)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        title = Gtk.Label(label="Sistema", xalign=0)
+        title.add_css_class("hero-title")
+        title.set_hexpand(True)
+        recheck_button = Gtk.Button(label="Reverificar")
+        recheck_button.connect("clicked", self.on_recheck_system)
+        header.append(title)
+        header.append(recheck_button)
+        page.append(header)
+
+        self.system_checks_list = Gtk.ListBox()
+        self.system_checks_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.system_checks_list.add_css_class("card")
+        checks_scroller = Gtk.ScrolledWindow()
+        checks_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        checks_scroller.set_child(self.system_checks_list)
+        checks_scroller.set_vexpand(True)
+        page.append(checks_scroller)
+
+        install_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        install_title = Gtk.Label(label="Instalação do jogo", xalign=0)
+        install_title.set_hexpand(True)
+        self.install_dropdown = Gtk.DropDown()
+        self.install_dropdown.set_size_request(420, -1)
+        self.install_dropdown.connect("notify::selected", self.on_install_selected)
+        install_box.append(install_title)
+        install_box.append(self.install_dropdown)
+        page.append(install_box)
+
+        backup_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        backup_title = Gtk.Label(
+            label="Backup do aplicativo (configurações e histórico)", xalign=0
+        )
+        backup_title.set_hexpand(True)
+        export_button = Gtk.Button(label="Exportar…")
+        export_button.connect("clicked", self.on_export_backup)
+        import_button = Gtk.Button(label="Importar…")
+        import_button.connect("clicked", self.on_import_backup)
+        backup_box.append(backup_title)
+        backup_box.append(export_button)
+        backup_box.append(import_button)
+        page.append(backup_box)
+
+        update_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.update_label = Gtk.Label(
+            label=f"MultiLUT Controller v{core.APP_VERSION}", xalign=0
+        )
+        self.update_label.set_hexpand(True)
+        update_button = Gtk.Button(label="Verificar atualizações agora")
+        update_button.connect("clicked", self.on_check_updates_clicked)
+        update_box.append(self.update_label)
+        update_box.append(update_button)
+        page.append(update_box)
+
+        self.refresh_system_page()
+        return page
+
+    def on_visible_page_changed(self, stack, _param) -> None:
+        name = stack.get_visible_child_name()
+        if name == "history":
+            self.refresh_history()
+        elif name == "system":
+            self.refresh_system_page()
+
+    def _diagnostic_row(self, item: dict) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        row.set_activatable(False)
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.set_margin_start(14)
+        box.set_margin_end(14)
+        state = str(item.get("state") or "info")
+        icon = Gtk.Image.new_from_icon_name(self.STATE_ICONS.get(state, "dialog-information-symbolic"))
+        icon.add_css_class(self.STATE_CLASSES.get(state, "muted"))
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        title = Gtk.Label(label=str(item.get("title") or ""), xalign=0)
+        title.set_wrap(True)
+        detail = Gtk.Label(label=str(item.get("detail") or ""), xalign=0)
+        detail.add_css_class("category-label")
+        detail.set_wrap(True)
+        text_box.append(title)
+        text_box.append(detail)
+        text_box.set_hexpand(True)
+        box.append(icon)
+        box.append(text_box)
+        action = str(item.get("action") or "")
+        if action and state in ("warn", "fail"):
+            button = Gtk.Button(label=str(item.get("action_label") or "Corrigir"))
+            button.add_css_class("pill")
+            button.connect("clicked", getattr(self, action))
+            box.append(button)
+        row.set_child(box)
+        return row
+
+    def refresh_system_page(self) -> None:
+        checks_list = getattr(self, "system_checks_list", None)
+        if checks_list is None:
+            return
+        child = checks_list.get_first_child()
+        while child is not None:
+            next_child = child.get_next_sibling()
+            checks_list.remove(child)
+            child = next_child
+        try:
+            items = extra.diagnostic_report()
+        except Exception as exc:  # diagnóstico nunca derruba a interface
+            items = [{"title": "Diagnóstico", "state": "fail", "detail": str(exc)}]
+        for item in items:
+            if (
+                item.get("title") == "Opção de inicialização do Steam"
+                and item.get("state") in ("warn", "fail")
+            ):
+                item["action"] = "on_fix_launch_option"
+            checks_list.append(self._diagnostic_row(item))
+        self.refresh_install_dropdown()
+
+    def on_fix_launch_option(self, _button) -> None:
+        """Corrige a opção de inicialização do jogo (exige Steam fechado)."""
+        if extra.steam_running():
+            self.toast("Feche o Steam antes de corrigir a opção de inicialização.", 6)
+            return
+        try:
+            summary = extra.ensure_launch_options()
+        except (OSError, core.MultiLUTError) as exc:
+            self.toast(f"Não foi possível corrigir: {exc}", 6)
+            return
+        if summary["changed"]:
+            self.toast(f"Opção corrigida em {len(summary['changed'])} arquivo(s).", 6)
+        else:
+            self.toast("A opção de inicialização já estava correta.")
+        self.refresh_system_page()
+
+    def refresh_install_dropdown(self) -> None:
+        """Oferece as instalações do jogo encontradas nas bibliotecas Steam."""
+        dropdown = getattr(self, "install_dropdown", None)
+        if dropdown is None:
+            return
+        roots = core.find_game_roots()
+        self._install_paths = roots
+        if len(roots) < 2:
+            dropdown.set_visible(False)
+            return
+        dropdown.set_visible(True)
+        labels = [str(root) for root in roots]
+        model = Gtk.StringList.new(labels)
+        dropdown.set_model(model)
+        configured = self.config.get("game_dir")
+        selected = 0
+        for index, root in enumerate(roots):
+            if str(root) == configured:
+                selected = index
+                break
+        dropdown.set_selected(selected)
+
+    def on_install_selected(self, dropdown, _param) -> None:
+        index = dropdown.get_selected()
+        paths = getattr(self, "_install_paths", [])
+        if index is None or not isinstance(index, int) or index >= len(paths):
+            return
+        self.config["game_dir"] = str(paths[index])
+        core.save_config(self.config)
+        self.toast(f"Instalação selecionada: {paths[index]}")
+
+    def on_recheck_system(self, _button) -> None:
+        self.refresh_system_page()
+        self.toast("Diagnóstico atualizado.")
+
+    def on_check_updates_clicked(self, _button) -> None:
+        self.toast("Procurando atualização…")
+        threading.Thread(target=self._updates_thread, daemon=True).start()
+
+    def on_export_backup(self, _button) -> None:
+        chooser = Gtk.FileChooserNative(
+            title="Exportar backup do MultiLUT Controller",
+            transient_for=self,
+            action=Gtk.FileChooserAction.SAVE,
+            accept_label="Exportar",
+        )
+        chooser.set_current_name("multilut-controller-backup.zip")
+        chooser.connect("response", self.on_export_chosen)
+        chooser.show()
+
+    def on_export_chosen(self, chooser, response) -> None:
+        if response != Gtk.ResponseType.ACCEPT:
+            return
+        chosen = chooser.get_file()
+        if chosen is None or chosen.get_path() is None:
+            self.toast("Selecione um destino válido.")
+            return
+        try:
+            count = extra.export_config_bundle(Path(chosen.get_path()))
+        except (OSError, core.MultiLUTError) as exc:
+            self.toast(f"Export falhou: {exc}", 6)
+            return
+        self.toast(f"Backup exportado com {count} itens.")
+
+    def on_import_backup(self, _button) -> None:
+        chooser = Gtk.FileChooserNative(
+            title="Importar backup do MultiLUT Controller",
+            transient_for=self,
+            action=Gtk.FileChooserAction.OPEN,
+            accept_label="Importar",
+        )
+        zip_filter = Gtk.FileFilter()
+        zip_filter.set_name("Backup do MultiLUT (*.zip)")
+        zip_filter.add_pattern("*.zip")
+        chooser.add_filter(zip_filter)
+        chooser.connect("response", self.on_import_chosen)
+        chooser.show()
+
+    def on_import_chosen(self, chooser, response) -> None:
+        if response != Gtk.ResponseType.ACCEPT:
+            return
+        chosen = chooser.get_file()
+        if chosen is None or chosen.get_path() is None:
+            self.toast("Selecione um arquivo .zip válido.")
+            return
+        try:
+            summary = extra.import_config_bundle(Path(chosen.get_path()))
+        except (OSError, ValueError, core.MultiLUTError) as exc:
+            self.toast(f"Import falhou: {exc}", 6)
+            return
+        self._apply_imported_config()
+        self.toast(
+            f"Backup restaurado ({summary['history_entries']} registros de histórico).",
+            6,
+        )
+
+    def _apply_imported_config(self) -> None:
+        """Recarrega a configuração importada e repinta toda a interface."""
+        self.config = core.load_config()
+        remembered = self.config.get("shader_path")
+        candidates = core.find_shader_candidates()
+        self.shader_path = Path(remembered).expanduser() if (
+            isinstance(remembered, str) and remembered.strip()
+        ) else (candidates[0] if candidates else core.default_shader_path())
+        if hasattr(self, "auto_switch"):
+            self.auto_switch.set_active(bool(self.config.get("auto_apply", False)))
+        if hasattr(self, "notify_switch"):
+            self.notify_switch.set_active(bool(self.config.get("notify_changes", False)))
+        if hasattr(self, "auto_launch_switch"):
+            self.auto_launch_switch.set_active(
+                bool(self.config.get("auto_apply_on_launch", False))
+            )
+        self.start_file_monitor()
+        self.refresh_shader_status(select_active=True)
+        self.refresh_history()
+        self.refresh_system_page()
 
     # ------------------------------------------------------------ verificação de atualizações
     def _check_updates_once(self) -> bool:

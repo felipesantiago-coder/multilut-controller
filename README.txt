@@ -110,6 +110,60 @@ O controlador aproveita esse recarregamento automatico:
 
 O programa detecta o processo do Insurgency e indica "tempo real" na interface.
 
+AUTOMACAO E INTEGRACAO
+----------------------
+
+- CLI sem interface: multilut-ctl list, multilut-ctl set <perfil>,
+  multilut-ctl active e multilut-ctl status. O casamento aceita id, nome
+  sem acentos ou slug do mapa (ex.: multilut-ctl set drycanal). A CLI e
+  instalada em $XDG_DATA_HOME/bin/multilut-ctl pelo install.sh e aceita
+  --shader para um arquivo alternativo e --no-history para nao registrar a
+  troca.
+- Historico local: cada troca fica em
+  ~/.local/state/multilut-controller/history.jsonl (com rotacao automatica)
+  e aparece na pagina "Historico" do aplicativo, com a origem da troca
+  (manual, piloto automatico por mapa, inicio do jogo ou CLI) e botao de
+  limpeza.
+- Notificacao do desktop: quando a troca vem de automacao (CLI, piloto
+  automatico, inicio do jogo ou processo externo) o aplicativo mostra um
+  aviso discreto. O interruptor "Notificar ao trocar de perfil" desliga isso.
+- Aplicar ultimo perfil ao abrir o jogo: com o interruptor ligado, o
+  aplicativo detecta a inicializacao do Insurgency e aplica o ultimo perfil
+  automaticamente.
+- Trocas externas: mudancas feitas fora da janela (por exemplo
+  "multilut-ctl set") sao percebidas pelo aplicativo via monitor de arquivo.
+- Verificador de atualizacoes: o aplicativo consulta a release mais recente
+  no GitHub em segundo plano e avisa com um toast quando existe versao nova;
+  a pagina Sistema tem o botao "Verificar atualizacoes agora".
+
+PAGINA SISTEMA
+--------------
+
+A pagina "Sistema" concentra o diagnostico e a manutencao:
+
+- Checklist de diagnostico: shader MultiLUT, camada Vulkan do vkBasalt,
+  runtime Vulkan, opcao de inicializacao do Steam, console.log do jogo,
+  dependencias opcionais de simulacao (Pillow/numpy) e instalacoes do jogo
+  encontradas. O botao "Reverificar" refaz a checagem.
+- Opcao de inicializacao: se o jogo estiver sem "%command%" ou sem
+  "ENABLE_VKBASALT=1" nas propriedades do Steam, o item aparece em amarelo
+  com o botao "Corrigir". A correcao acrescenta apenas o que falta, exige o
+  Steam fechado (ele regravaria a configuracao), cria um backup
+  localconfig.vdf.multilut.bak antes de gravar e e idempotente.
+- Instalacoes do jogo: com mais de uma biblioteca Steam detectada, um
+  seletor permite escolher qual instalacao o aplicativo considera.
+- Backup do aplicativo: "Exportar..." empacota config.json e history.jsonl
+  em um .zip portatil; "Importar..." restaura o backup. Caminhos de maquina
+  vindos do arquivo so sao mantidos se existirem neste sistema.
+
+SIMULACAO DE LUT (OPCIONAL)
+---------------------------
+
+Com python3-numpy e python3-pillow instalados, o painel de detalhes pode
+mostrar uma aproximacao do efeito do perfil aplicado a foto do mapa, antes
+de voce aplicar o perfil no jogo. Sem esses pacotes o aplicativo funciona
+normalmente — o item aparece como informativo na pagina Sistema.
+
 LIMPEZA DA FUNCIONALIDADE DE LUNETAS (VERSOES ANTERIORES)
 --------------------------------------------------------
 
@@ -171,6 +225,12 @@ Aplicativo:
 Preferencias:
   ~/.config/multilut-controller/config.json
 
+Historico local:
+  ~/.local/state/multilut-controller/history.jsonl
+
+CLI (apos ./install.sh):
+  ~/.local/share/bin/multilut-ctl
+
 Shader padrao:
   ~/.config/vkBasalt/reshade-shaders/Shaders/MultiLUT_Insurgency_Optimized.fx
 
@@ -181,7 +241,10 @@ VALIDACAO
 ---------
 
 O nucleo foi testado para leitura, alteracao, backup, restauracao, recusa de
-perfil invalido, validacao do shader, ordenacao alfabetica dos perfis e as
-duas secoes da lista (tests/test_core.py). A interface foi verificada
-estaticamente; o teste visual final precisa ser realizado no seu ambiente
-GNOME/Wayland.
+perfil invalido, validacao do shader, ordenacao alfabetica dos perfis, as
+duas secoes da lista, historico, versionamento, bibliotecas Steam, CLI de
+ponta a ponta, cartoes de mapa, opcoes de inicializacao do Steam (leitura e
+escrita com backup), diagnostico e backup do aplicativo — 55 testes e 18
+subtestes (tests/test_core.py, tests/test_lote1.py e tests/test_lote2.py).
+A interface foi verificada em GTK real sob Xvfb; o teste visual final no seu
+ambiente GNOME/Wayland continua recomendado.
