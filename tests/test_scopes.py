@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import struct
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 from multilut_core import MultiLUTError
@@ -632,11 +634,14 @@ class ServerPatchTests(unittest.TestCase):
         result = scopes.patch_server_theaters(
             self.game, 12.0, ["optic_scope_7x", "optic_scope_mk4"])
         text = self.plain.read_text(encoding="utf-8")
-        self.assertIn('"#base" "multilut_zoom.theater" // multilut-zoom-client', text)
+        self.assertIn(
+            '"#base" "multilut_zoom_fov.theater" // multilut-zoom-client', text)
         self.assertIn(self.plain.name, result["patched"])
-        # a base multilut_zoom.theater precisa existir para o #base resolver
-        self.assertTrue(
-            (self.theaters / "multilut_zoom.theater").is_file())
+        # a base multilut_zoom_fov.theater precisa existir para o #base resolver
+        fov_base = self.theaters / scopes.FOV_BASE_NAME
+        self.assertTrue(fov_base.is_file())
+        # a base só-FOVs não herda o classic (não injeta conteúdo de outro modo)
+        self.assertNotIn("#base", fov_base.read_text(encoding="utf-8"))
 
     def test_backup_created_once_and_revert_restores_bytes(self):
         scopes.patch_server_theaters(self.game, 12.0, ["optic_scope_7x"])
@@ -685,3 +690,184 @@ class ServerPatchTests(unittest.TestCase):
         self.assertEqual(
             source.read_text(encoding="utf-8"),
             scopes.build_theater(12.0, ["optic_scope_7x"]))
+
+
+# ---------------------------------------------------------------------------
+# Extração e patch de theaters que só existem dentro dos VPKs do jogo
+# ---------------------------------------------------------------------------
+
+_VPK_SIG = 0x55AA1234
+
+
+def _make_vpk(files: list[tuple[str, bytes]], version: int = 1,
+              storage: str = "archive", corrupt_crc: bool = False
+              ) -> tuple[bytes, dict[int, bytes]]:
+    """Constrói um *_dir.vpk sintético (formato v1/v2) para os testes.
+
+    files: lista de (caminho_relativo, conteúdo). storage define onde o
+    conteúdo mora: "archive" (em _NNN.vpk), "embedded" (logo após a árvore,
+    archive_index 0x7FFF) ou "preload" (inteiro no preload da entrada).
+    Devolve (bytes do _dir.vpk, {índice: bytes do archive}).
+    """
+    tree = bytearray()
+    embedded = bytearray()
+    archives: dict[int, bytearray] = {}
+    by_ext: dict[str, dict[str, list[tuple[str, bytes]]]] = {}
+    for rel, content in files:
+        folder, filename = rel.rsplit("/", 1)
+        name, ext = filename.rsplit(".", 1)
+        by_ext.setdefault(ext, {}).setdefault(folder, []).append((name, content))
+    for ext, folders in by_ext.items():
+        tree += ext.encode() + b"\x00"
+        for folder, names in folders.items():
+            tree += folder.encode() + b"\x00"
+            for name, content in names:
+                crc = zlib.crc32(content) & 0xFFFFFFFF
+                if corrupt_crc:
+                    crc ^= 0xFF
+                if storage == "preload":
+                    entry = struct.pack("<IHHII", crc, len(content),
+                                        0x7FFF, 0, 0)
+                    entry += struct.pack("<H", 0xFFFF) + content
+                elif storage == "embedded":
+                    offset = len(embedded)
+                    embedded += content
+                    entry = struct.pack("<IHHII", crc, 0, 0x7FFF,
+                                        offset, len(content))
+                    entry += struct.pack("<H", 0xFFFF)
+                else:
+                    blob = archives.setdefault(0, bytearray())
+                    offset = len(blob)
+                    blob += content
+                    entry = struct.pack("<IHHII", crc, 0, 0,
+                                        offset, len(content))
+                    entry += struct.pack("<H", 0xFFFF)
+                tree += name.encode() + b"\x00" + entry
+            tree += b"\x00"  # fim dos arquivos da pasta
+        tree += b"\x00"  # fim das pastas da extensão
+    tree += b"\x00"  # fim das extensões
+    header = struct.pack("<III", _VPK_SIG, version, len(tree))
+    if version == 2:
+        header += struct.pack("<IIII", 0, 0, 0, 0)  # campos extras do v2
+    return header + bytes(tree) + bytes(embedded), {
+        index: bytes(blob) for index, blob in archives.items()}
+
+
+class VpkPatchTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.game = _fake_game_dir(Path(self._tmp.name))
+        self.theaters = self.game / "scripts" / "theaters"
+        self.vpk_dir = self.game / "vpk"
+        self.vpk_dir.mkdir()
+
+    def _write_vpk(self, stem: str, files: list[tuple[str, bytes]],
+                   version: int = 1, storage: str = "archive",
+                   corrupt_crc: bool = False) -> None:
+        dir_bytes, archives = _make_vpk(
+            files, version=version, storage=storage, corrupt_crc=corrupt_crc)
+        (self.vpk_dir / f"{stem}_dir.vpk").write_bytes(dir_bytes)
+        for index, blob in archives.items():
+            (self.vpk_dir / f"{stem}_{index:03d}.vpk").write_bytes(blob)
+
+    def test_extracts_and_patches_upgrades_from_archive(self):
+        self._write_vpk("insurgency_misc", [
+            ("scripts/theaters/default_weapon_upgrades.theater",
+             SERVER_THEATER_WITH_OPTICS.encode("utf-8"))])
+        result = scopes.patch_server_theaters(
+            self.game, 12.0, ["optic_scope_7x"])
+        loose = self.theaters / "default_weapon_upgrades.theater"
+        self.assertIn(loose.name, result["patched"])
+        text = loose.read_text(encoding="utf-8")
+        self.assertIn('"fov_wpn_scope"\t\t"5.83"', text)
+        self.assertIn('"fov_wpn_scope"\t"5.83"', text)  # sub-bloco mosin
+        self.assertIn('"fov_wpn_scope"\t\t"17.5"', text)  # po4x24 intocada
+        backup = loose.with_name(loose.name + ".multilut.bak")
+        self.assertEqual(backup.read_text(encoding="utf-8"),
+                         SERVER_THEATER_WITH_OPTICS)
+
+    def test_theater_without_scope_fov_is_not_extracted(self):
+        self._write_vpk("insurgency_misc", [
+            ("scripts/theaters/plain.theater",
+             SERVER_THEATER_PLAIN.encode("utf-8"))])
+        result = scopes.patch_server_theaters(
+            self.game, 12.0, ["optic_scope_7x"])
+        self.assertFalse((self.theaters / "plain.theater").exists())
+        self.assertNotIn("plain.theater", result["patched"])
+
+    def test_existing_loose_copy_wins_over_vpk(self):
+        loose = self.theaters / "default_weapon_upgrades.theater"
+        loose.write_text(SERVER_THEATER_PLAIN, encoding="utf-8")
+        self._write_vpk("insurgency_misc", [
+            ("scripts/theaters/default_weapon_upgrades.theater",
+             SERVER_THEATER_WITH_OPTICS.encode("utf-8"))])
+        scopes.patch_server_theaters(self.game, 12.0, ["optic_scope_7x"])
+        text = loose.read_text(encoding="utf-8")
+        # o conteúdo do VPK NÃO foi extraído por cima da cópia local
+        self.assertNotIn("optic_scope_7x", text)
+        self.assertIn("#base", text)  # a cópia local é que foi patcheada
+        # o backup guarda a cópia local ORIGINAL, não o conteúdo do VPK
+        backup = loose.with_name(loose.name + ".multilut.bak")
+        self.assertEqual(backup.read_text(encoding="utf-8"),
+                         SERVER_THEATER_PLAIN)
+
+    def test_crc_mismatch_is_skipped(self):
+        self._write_vpk("insurgency_misc", [
+            ("scripts/theaters/default_weapon_upgrades.theater",
+             SERVER_THEATER_WITH_OPTICS.encode("utf-8"))], corrupt_crc=True)
+        result = scopes.patch_server_theaters(
+            self.game, 12.0, ["optic_scope_7x"])
+        self.assertTrue(any("CRC" in item for item in result["skipped"]))
+        self.assertFalse(
+            (self.theaters / "default_weapon_upgrades.theater").exists())
+
+    def test_preload_only_vpk_is_extracted(self):
+        self._write_vpk("insurgency_misc", [
+            ("scripts/theaters/default_weapon_upgrades.theater",
+             SERVER_THEATER_WITH_OPTICS.encode("utf-8"))], storage="preload")
+        result = scopes.patch_server_theaters(
+            self.game, 12.0, ["optic_scope_7x"])
+        self.assertIn("default_weapon_upgrades.theater", result["patched"])
+        self.assertIn(
+            '"fov_wpn_scope"\t\t"5.83"',
+            (self.theaters / "default_weapon_upgrades.theater")
+            .read_text(encoding="utf-8"))
+
+    def test_embedded_vpk_is_extracted(self):
+        self._write_vpk("insurgency_misc", [
+            ("scripts/theaters/default_weapon_upgrades.theater",
+             SERVER_THEATER_WITH_OPTICS.encode("utf-8"))], storage="embedded")
+        result = scopes.patch_server_theaters(
+            self.game, 12.0, ["optic_scope_7x"])
+        self.assertIn("default_weapon_upgrades.theater", result["patched"])
+
+    def test_vpk_version2_header_is_supported(self):
+        self._write_vpk("insurgency_misc", [
+            ("scripts/theaters/default_weapon_upgrades.theater",
+             SERVER_THEATER_WITH_OPTICS.encode("utf-8"))], version=2)
+        result = scopes.patch_server_theaters(
+            self.game, 12.0, ["optic_scope_7x"])
+        self.assertIn("default_weapon_upgrades.theater", result["patched"])
+
+    def test_non_vpk_file_is_skipped_safely(self):
+        (self.vpk_dir / "junk_dir.vpk").write_bytes(b"nao e um vpk" * 4)
+        result = scopes.patch_server_theaters(
+            self.game, 12.0, ["optic_scope_7x"])
+        self.assertTrue(any(
+            item.startswith("vpk junk_dir.vpk") for item in result["skipped"]))
+
+    def test_revert_restores_extracted_bytes_and_removes_fov_base(self):
+        self._write_vpk("insurgency_misc", [
+            ("scripts/theaters/default_weapon_upgrades.theater",
+             SERVER_THEATER_WITH_OPTICS.encode("utf-8"))])
+        scopes.patch_server_theaters(self.game, 12.0, ["optic_scope_7x"])
+        loose = self.theaters / "default_weapon_upgrades.theater"
+        restored = scopes.revert_server_patches(self.game)
+        self.assertEqual(restored, 1)
+        self.assertEqual(loose.read_text(encoding="utf-8"),
+                         SERVER_THEATER_WITH_OPTICS)
+        self.assertFalse(
+            loose.with_name(loose.name + ".multilut.bak").exists())
+        self.assertFalse(
+            (self.theaters / scopes.FOV_BASE_NAME).exists())

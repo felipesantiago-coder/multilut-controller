@@ -25,9 +25,12 @@ default_weapon_upgrades.theater).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NamedTuple
 import os
 import re
+import struct
 import subprocess
+import zlib
 
 from multilut_core import MultiLUTError, _atomic_write
 
@@ -37,6 +40,10 @@ MAX_TARGET = 12.0                 # limite pedido pelo usuário
 MIN_TARGET = 1.0
 QUICK_TARGETS = (3.0, 5.0, 10.0, 12.0)  # opções rápidas de ampliação
 THEATER_NAME = "multilut_zoom"
+# Base usada pela linha "#base" do patch client-side: contém SOMENTE os FOVs
+# das ópticas (sem herdar o classic), para não injetar conteúdo de outro modo
+# de jogo em theaters de servidores. Gerado junto com o multilut_zoom.theater.
+FOV_BASE_NAME = "multilut_zoom_fov.theater"
 AUTOEXEC_BEGIN = "// >>> MultiLUT Controller - lunetas ampliadas >>>"
 AUTOEXEC_END = "// <<< MultiLUT Controller - lunetas ampliadas <<<"
 AUTOEXEC_LINE = f'mp_theater_override "{THEATER_NAME}"'
@@ -160,8 +167,13 @@ def compute_scope_fov(current_fov: float, current_mag: float, target_mag: float)
     return round(fov * (mag / target), 2)
 
 
-def build_theater(target_mag: float, optic_ids: list[str] | tuple[str, ...]) -> str:
-    """Gera o conteúdo do theater com as lunetas ampliadas."""
+def build_theater(target_mag: float, optic_ids: list[str] | tuple[str, ...],
+                  include_base: bool = True) -> str:
+    """Gera o conteúdo do theater com as lunetas ampliadas.
+
+    Com include_base=False o arquivo sai sem a linha "#base" — é o formato
+    usado pelo multilut_zoom_fov.theater, que só injeta FOVs via #base.
+    """
     try:
         target = float(target_mag)
     except (TypeError, ValueError):
@@ -182,8 +194,9 @@ def build_theater(target_mag: float, optic_ids: list[str] | tuple[str, ...]) -> 
         "// Desfaca removendo este arquivo ou pelo botao Restaurar do aplicativo.",
         "",
     ]
-    for base in THEATER_BASE_CHAIN:
-        lines.append(f'"#base" "{base}"')
+    if include_base:
+        for base in THEATER_BASE_CHAIN:
+            lines.append(f'"#base" "{base}"')
     lines += ["", '"theater"', "{", "\t\"weapon_upgrades\"", "\t{"]
     for optic_id in optic_ids:
         _name, _label, scope, ironsight, focus, mag = OPTIC_BY_ID[optic_id]
@@ -448,7 +461,7 @@ def _patch_theater_text(text: str, target_mag: float,
 
     missing = selected - found
     if missing and not any(SERVER_PATCH_TAG in ln for ln in out):
-        base_line = f'"#base" "{THEATER_NAME}.theater" // {SERVER_PATCH_TAG}'
+        base_line = f'"#base" "{FOV_BASE_NAME}" // {SERVER_PATCH_TAG}'
         insert_at = 0
         for index, existing in enumerate(out):
             if existing.strip().lower().startswith('"#base"'):
@@ -462,14 +475,187 @@ def _theaters_dir(game_dir: Path) -> Path:
     return Path(game_dir) / "scripts" / "theaters"
 
 
+# ---------------------------------------------------------------------------
+# Leitura de VPK: os theaters de fábrica (default_weapon_upgrades.theater
+# etc.) não existem soltos na instalação — morrem dentro dos *_dir.vpk.
+# Sem extração, um servidor que pede o theater "default" carrega o original
+# do VPK e o patch client-side não tem efeito sobre ele.
+# ---------------------------------------------------------------------------
+
+_VPK_DIR_SIGNATURE = 0x55AA1234
+_VPK_EMBEDDED_INDEX = 0x7FFF          # dados embutidos no próprio _dir.vpk
+_VPK_TREE_OFFSET = {1: 12, 2: 28}     # início da árvore por versão de cabeçalho
+
+
+class _VpkEntry(NamedTuple):
+    crc: int
+    archive_index: int
+    entry_offset: int
+    entry_length: int
+    preload: bytes
+
+
+def _read_cstring(data: bytes, pos: int) -> tuple[str, int]:
+    end = data.find(b"\x00", pos)
+    if end < 0:
+        raise ValueError("string sem terminador")
+    return data[pos:end].decode("utf-8", "replace"), end + 1
+
+
+def _vpk_entries(dir_vpk: Path) -> tuple[dict[str, _VpkEntry], int]:
+    """Lê a árvore de um *_dir.vpk (v1/v2). Devolve (arquivos, fim da árvore)."""
+    data = dir_vpk.read_bytes()
+    if len(data) < 12:
+        raise ValueError("arquivo muito pequeno para ser um VPK")
+    signature, version, tree_size = struct.unpack_from("<III", data, 0)
+    if signature != _VPK_DIR_SIGNATURE:
+        raise ValueError("assinatura VPK desconhecida")
+    if version not in _VPK_TREE_OFFSET:
+        raise ValueError(f"versão de VPK não suportada: {version}")
+    tree_start = _VPK_TREE_OFFSET[version]
+    tree_end = tree_start + tree_size
+    if tree_end > len(data):
+        raise ValueError("árvore do VPK truncada")
+    pos = tree_start
+    entries: dict[str, _VpkEntry] = {}
+    while True:
+        extension, pos = _read_cstring(data, pos)
+        if not extension:
+            break
+        while True:
+            folder, pos = _read_cstring(data, pos)
+            if not folder:
+                break
+            while True:
+                name, pos = _read_cstring(data, pos)
+                if not name:
+                    break
+                if pos + 18 > len(data):
+                    raise ValueError("entrada do VPK truncada")
+                crc, preload_len, archive_index, entry_offset, entry_length = \
+                    struct.unpack_from("<IHHII", data, pos)
+                pos += 16
+                pos += 2  # terminador 0xFFFF da entrada
+                preload = data[pos:pos + preload_len]
+                if len(preload) < preload_len:
+                    raise ValueError("preload do VPK truncado")
+                pos += preload_len
+                key = f"{folder}/{name}.{extension}".replace("\\", "/")
+                entries[key] = _VpkEntry(
+                    crc, archive_index, entry_offset, entry_length, preload)
+    return entries, tree_end
+
+
+def _vpk_read(dir_vpk: Path, entry: _VpkEntry, tree_end: int,
+              dir_data: bytes) -> bytes | None:
+    """Monta o conteúdo de um arquivo do VPK e valida pelo CRC da entrada.
+
+    A montagem correta (arquivo solto no archive, prefixo em preload,
+    embutido no _dir.vpk) é confirmada pelo CRC — qualquer divergência
+    devolve None e o arquivo é recusado em vez de gravado errado.
+    """
+    archived = b""
+    if entry.archive_index == _VPK_EMBEDDED_INDEX:
+        if entry.entry_length:
+            start = tree_end + entry.entry_offset
+            archived = dir_data[start:start + entry.entry_length]
+    elif entry.entry_length:
+        archive = dir_vpk.with_name(
+            re.sub(r"_dir\.vpk$", f"_{entry.archive_index:03d}.vpk", dir_vpk.name))
+        try:
+            with archive.open("rb") as handle:
+                handle.seek(entry.entry_offset)
+                archived = handle.read(entry.entry_length)
+        except OSError:
+            return None
+        if len(archived) != entry.entry_length:
+            return None
+    for candidate in (archived, entry.preload + archived):
+        if len(candidate) and zlib.crc32(candidate) & 0xFFFFFFFF == entry.crc:
+            return candidate
+    return None
+
+
+def _patch_from_vpks(game_dir: Path, theaters_dir: Path, target_mag: float,
+                     optic_ids: list[str] | tuple[str, ...],
+                     result: dict[str, list[str]]) -> None:
+    """Extrai dos VPKs os theaters que só existem empacotados e patcheia.
+
+    Só vale a pena extrair theaters que definem fov_wpn_scope (os demais não
+    afetam luneta nenhuma). O arquivo só é gravado solto se o patch trocou
+    algum FOV das ópticas selecionadas; o backup .multilut.bak guarda o
+    conteúdo original do VPK, e o mesmo revert_server_patches devolve tudo.
+    """
+    vpk_dir = Path(game_dir) / "vpk"
+    if not vpk_dir.is_dir():
+        return
+    for dir_vpk in sorted(vpk_dir.glob("*_dir.vpk")):
+        try:
+            entries, tree_end = _vpk_entries(dir_vpk)
+            dir_data = dir_vpk.read_bytes()
+        except (OSError, ValueError) as exc:
+            result["skipped"].append(f"vpk {dir_vpk.name} (leitura: {exc})")
+            continue
+        for key, entry in sorted(entries.items()):
+            parts = key.split("/")
+            if (len(parts) != 3 or parts[0] != "scripts"
+                    or parts[1] != "theaters"
+                    or not parts[2].endswith(".theater")):
+                continue
+            name = parts[2]
+            if name in (f"{THEATER_NAME}.theater", FOV_BASE_NAME):
+                continue
+            loose = theaters_dir / name
+            if loose.exists():
+                continue  # cópia local (fastdl ou extração anterior) decide
+            content = _vpk_read(dir_vpk, entry, tree_end, dir_data)
+            if content is None:
+                result["skipped"].append(f"{name} (CRC do VPK não confere)")
+                continue
+            text = content.decode("utf-8", errors="surrogateescape")
+            if "fov_wpn_scope" not in text:
+                continue
+            try:
+                patched, replaced, _found = _patch_theater_text(
+                    text, target_mag, optic_ids)
+            except _TheaterPatchError as exc:
+                result["skipped"].append(f"{name} ({exc})")
+                continue
+            if replaced == 0:
+                continue  # nenhuma óptica selecionada com FOV novo aqui
+            backup = loose.with_name(loose.name + _BAK_SUFFIX)
+            try:
+                _atomic_write(backup, text, 0o644)
+                _atomic_write(loose, patched, 0o644)
+            except OSError as exc:
+                result["skipped"].append(f"{name} (gravação: {exc})")
+                continue
+            result["patched"].append(name)
+
+
+def _write_fov_base(game_dir: Path, target_mag: float,
+                    optic_ids: list[str] | tuple[str, ...]) -> Path:
+    """Grava o multilut_zoom_fov.theater (só FOVs, sem #base) no jogo."""
+    path = _theaters_dir(game_dir) / FOV_BASE_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+    _atomic_write(
+        path, build_theater(target_mag, optic_ids, include_base=False), mode)
+    return path
+
+
 def patch_server_theaters(game_dir: Path | str, target_mag: float,
                           optic_ids: list[str] | tuple[str, ...]
                           ) -> dict[str, list[str]]:
-    """Aplica a ampliação nas cópias locais dos theaters baixados de servidores.
+    """Aplica a ampliação nas cópias locais dos theaters de servidores.
 
     Client-side: altera SOMENTE a cópia no seu disco — o original fica em
     <arquivo>.multilut.bak na primeira alteração e o servidor continua
-    mandando no conteúdo oficial dele. Use somente com autorização dos
+    mandando no conteúdo oficial dele. Cobre tanto os theaters soltos em
+    scripts/theaters (baixados por fastdl) quanto os que só existem dentro
+    dos VPKs do jogo (default_weapon_upgrades.theater etc.), que são
+    extraídos para o disco antes do patch — a cópia solta prevalece sobre o
+    VPK na busca de arquivos do Source. Use somente com autorização dos
     administradores; revert_server_patches desfaz tudo. Devolve um mapa
     com as listas "patched", "unchanged" e "skipped".
     """
@@ -481,9 +667,13 @@ def patch_server_theaters(game_dir: Path | str, target_mag: float,
         "patched": [], "unchanged": [], "skipped": []}
     if not theaters_dir.is_dir():
         return result
-    source_name = f"{THEATER_NAME}.theater"
+    # Base só-FOVs usada pela linha "#base" do patch (sem herdar o classic).
+    _write_fov_base(path, target_mag, optic_ids)
+    # Theaters que só existem dentro dos VPKs: extrai + patcheia.
+    _patch_from_vpks(path, theaters_dir, target_mag, optic_ids, result)
+    own_names = {f"{THEATER_NAME}.theater", FOV_BASE_NAME}
     for theater_file in sorted(theaters_dir.glob("*.theater")):
-        if theater_file.name == source_name:
+        if theater_file.name in own_names:
             continue
         try:
             original = theater_file.read_text(
@@ -520,6 +710,13 @@ def revert_server_patches(game_dir: Path | str) -> int:
     if not theaters_dir.is_dir():
         return 0
     restored = 0
+    fov_base = theaters_dir / FOV_BASE_NAME
+    if fov_base.is_file():
+        try:
+            fov_base.unlink()
+        except OSError as exc:
+            raise MultiLUTError(
+                f"Não foi possível remover {FOV_BASE_NAME}: {exc}") from exc
     for backup in sorted(theaters_dir.glob("*.theater" + _BAK_SUFFIX)):
         original = backup.with_name(backup.name[: -len(_BAK_SUFFIX)])
         try:

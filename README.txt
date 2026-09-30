@@ -181,11 +181,20 @@ que o servidor entrega no seu disco (scripts/theaters/*.theater):
 - Marque "Aplicar também nos theaters de servidores (client-side)" na
   aba Lunetas e clique em Ativar. Cada theater local recebe o FOV novo
   das ópticas selecionadas; para as ópticas que não existem no arquivo,
-  é acrescentada a linha "#base" multilut_zoom.theater marcada com o
+  é acrescentada a linha "#base" multilut_zoom_fov.theater (um arquivo
+  só com os FOVs, sem herdar conteúdo de outro modo) marcada com o
   comentário "multilut-zoom-client". O original de cada arquivo fica em
   <arquivo>.multilut.bak na primeira alteração.
+- Os theaters de fábrica (default_weapon_upgrades.theater etc.) NÃO
+  ficam soltos na instalação — vivem dentro dos VPKs em insurgency/vpk.
+  O aplicativo extrai automaticamente para scripts/theaters os theaters
+  empacotados que definem FOV de luneta e aplica o patch neles: a cópia
+  solta prevalece sobre o VPK na busca de arquivos do Source, então o
+  theater que o servidor pedir (default, classic…) já carrega o FOV
+  novo. O backup .multilut.bak guarda o conteúdo original do VPK.
 - O botão "Restaurar padrão do jogo" também devolve todos os theaters
-  de servidor ao original e apaga os backups.
+  de servidor ao original, apaga os backups e remove o
+  multilut_zoom_fov.theater.
 - O patch é somente visual (FOV): dano, recuo e equipamentos continuam
   definidos pelo servidor. Se um servidor atualizar o theater dele, o
   jogo baixa a versão nova por cima — clique em Ativar de novo para
