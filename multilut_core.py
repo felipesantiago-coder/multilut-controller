@@ -81,6 +81,27 @@ def profiles_alphabetical(
     return tuple(sorted(profiles, key=_profile_sort_key))
 
 
+def profiles_by_section(
+    profiles: Iterable[Profile] = PROFILES,
+) -> tuple[tuple[str, tuple[Profile, ...]], ...]:
+    """Perfis agrupados nas duas seções da interface, cada uma alfabética.
+
+    "Efeitos de mapa" reúne os perfis criados para um mapa específico
+    (categoria "Mapa"); "Efeitos utilitários" reúne os que valem em
+    qualquer cenário — interiores, longa distância, competitivos e o
+    neutro de referência.
+    """
+    ordered = tuple(sorted(profiles, key=_profile_sort_key))
+    mapas = tuple(item for item in ordered if item.category == "Mapa")
+    utilitarios = tuple(item for item in ordered if item.category != "Mapa")
+    sections: list[tuple[str, tuple[Profile, ...]]] = []
+    if mapas:
+        sections.append(("Efeitos de mapa", mapas))
+    if utilitarios:
+        sections.append(("Efeitos utilitários", utilitarios))
+    return tuple(sections)
+
+
 class MultiLUTError(RuntimeError):
     """A user-facing MultiLUT operation error."""
 

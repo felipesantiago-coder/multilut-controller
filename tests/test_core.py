@@ -78,5 +78,32 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(ordered[-1].name, "Verticality")
 
 
+class SectionTests(unittest.TestCase):
+    def test_two_sections_in_fixed_order(self):
+        sections = core.profiles_by_section()
+        self.assertEqual(
+            [title for title, _profiles in sections],
+            ["Efeitos de mapa", "Efeitos utilitários"],
+        )
+
+    def test_sections_cover_every_profile_exactly_once(self):
+        ids = [
+            profile.id
+            for _title, profiles in core.profiles_by_section()
+            for profile in profiles
+        ]
+        self.assertEqual(sorted(ids), sorted(profile.id for profile in core.PROFILES))
+
+    def test_each_section_is_alphabetical(self):
+        for _title, profiles in core.profiles_by_section():
+            keys = [core._profile_sort_key(profile) for profile in profiles]
+            self.assertEqual(keys, sorted(keys))
+
+    def test_map_section_only_has_map_category(self):
+        mapas, utilitarios = core.profiles_by_section()
+        self.assertTrue(all(profile.category == "Mapa" for profile in mapas[1]))
+        self.assertTrue(all(profile.category != "Mapa" for profile in utilitarios[1]))
+
+
 if __name__ == "__main__":
     unittest.main()

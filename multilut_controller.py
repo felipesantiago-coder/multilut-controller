@@ -94,6 +94,22 @@ class ProfileRow(Gtk.ListBoxRow):
         self.set_child(box)
 
 
+class SectionHeaderRow(Gtk.ListBoxRow):
+    """Cabeçalho de seção da lista de perfis (não selecionável)."""
+
+    def __init__(self, title: str):
+        super().__init__()
+        self.set_selectable(False)
+        self.set_activatable(False)
+        self.set_focusable(False)
+        label = Gtk.Label(label=title, xalign=0)
+        label.add_css_class("section-title")
+        label.set_margin_top(12)
+        label.set_margin_bottom(2)
+        label.set_margin_start(16)
+        self.set_child(label)
+
+
 class MultiLUTWindow(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application):
         super().__init__(application=application)
@@ -258,7 +274,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         heading.set_margin_top(14)
         label = Gtk.Label(label="Perfis", xalign=0)
         label.add_css_class("section-title")
-        hint = Gtk.Label(label="Mapas e modos competitivos", xalign=0)
+        hint = Gtk.Label(label="Efeitos de mapa e utilitários", xalign=0)
         hint.add_css_class("muted")
         heading.append(label)
         heading.append(hint)
@@ -273,8 +289,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.profile_list = Gtk.ListBox()
         self.profile_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.profile_list.connect("row-selected", self.on_profile_selected)
-        for profile in core.profiles_alphabetical():
-            self.profile_list.append(ProfileRow(profile))
+        for section_title, profiles in core.profiles_by_section():
+            self.profile_list.append(SectionHeaderRow(section_title))
+            for profile in profiles:
+                self.profile_list.append(ProfileRow(profile))
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
@@ -426,37 +444,60 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.detail_tone.set_label(f"Resposta visual: {profile.tone}")
 
     def select_profile_id(self, profile_id: int) -> None:
-        # A lista aparece em ordem alfabética: localize pelo id do perfil,
-        # não pela posição da linha.
+        # A lista aparece em seções alfabéticas: localize pelo id do perfil,
+        # não pela posição da linha, e ignore os cabeçalhos de seção.
         self._programmatic_selection = True
         try:
             row = self.profile_list.get_first_child()
             while row is not None:
-                if row.profile.id == profile_id:
+                profile = getattr(row, "profile", None)
+                if profile is not None and profile.id == profile_id:
                     self.profile_list.select_row(row)
-                    self.update_detail(row.profile)
+                    self.update_detail(profile)
                     break
                 row = row.get_next_sibling()
         finally:
             self._programmatic_selection = False
 
     def on_profile_selected(self, _listbox, row) -> None:
-        if row is None:
+        profile = getattr(row, "profile", None) if row is not None else None
+        if profile is None:  # cabeçalho de seção não é selecionável
             return
-        self.update_detail(row.profile)
+        self.update_detail(profile)
         if self.auto_switch.get_active() and not self._programmatic_selection:
             self.apply_selected_profile()
 
     def on_search_changed(self, entry: Gtk.SearchEntry) -> None:
         query = entry.get_text().casefold().strip()
+        # Marca cada perfil como visível ou não; um cabeçalho de seção só
+        # aparece se algum perfil da seção dele passar na busca.
+        rows: list[Gtk.ListBoxRow] = []
         row = self.profile_list.get_first_child()
         while row is not None:
-            profile = row.profile
+            rows.append(row)
+            row = row.get_next_sibling()
+        visible: dict[Gtk.ListBoxRow, bool] = {}
+        header: Gtk.ListBoxRow | None = None
+        section_has_match = False
+        for row in rows:
+            profile = getattr(row, "profile", None)
+            if profile is None:  # cabeçalho: fecha a seção anterior
+                if header is not None:
+                    visible[header] = section_has_match
+                header = row
+                section_has_match = False
+                continue
             haystack = " ".join(
                 (profile.name, profile.category, profile.summary, profile.best_for)
             ).casefold()
-            row.set_visible(not query or query in haystack)
-            row = row.get_next_sibling()
+            shows = not query or query in haystack
+            visible[row] = shows
+            if shows:
+                section_has_match = True
+        if header is not None:
+            visible[header] = section_has_match
+        for row, shows in visible.items():
+            row.set_visible(shows)
 
     def on_auto_changed(self, switch, _param) -> None:
         self.config["auto_apply"] = switch.get_active()
