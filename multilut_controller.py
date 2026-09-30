@@ -735,7 +735,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             if server_patched:
                 text += (
                     f" Client-side em vigor em {len(server_patched)} "
-                    "theater(s) de servidor."
+                    "theater(s) de servidor: "
+                    + ", ".join(server_patched) + "."
                 )
             self.scopes_status.set_label(text)
         else:
@@ -838,7 +839,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                 if patch_result["patched"]:
                     server_note = (
                         f" Client-side: {len(patch_result['patched'])} "
-                        "theater(s) de servidor alterado(s)."
+                        "theater(s) de servidor alterado(s): "
+                        + ", ".join(patch_result["patched"]) + "."
                     )
                 elif patch_result["skipped"]:
                     server_note = (
