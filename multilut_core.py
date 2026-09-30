@@ -598,7 +598,9 @@ def find_console_log() -> Path | None:
 # Padrões de linha do console (Source engine) que revelam o mapa carregado.
 # Formatos confirmados em logs reais: 'Loading map "xxx"' (servidor TF2/CS e
 # cliente GoldSrc), 'Host_NewGame on map xxx' e 'Mapchange to xxx' (servidores
-# Insurgency/Day of Infamy da NWI).
+# Insurgency/Day of Infamy da NWI) e o banner do próprio cliente com -condebug,
+# que abre com 'Map: xxx' e é reimpresso a cada conexão/troca de mapa do
+# cliente (linha 'Map:' do cabeçalho com Build e Server Number).
 MAP_LINE_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r'Loading map "([^"\s]+)"'),
     re.compile(r"Host_NewGame on map (\S+)"),
@@ -606,6 +608,9 @@ MAP_LINE_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"Host_Changelevel\s*\(\s*[^,()]+,\s*([^\s,()]+)"),
     re.compile(r"Loading map (\S+)"),
     re.compile(r"^\s*map\s+([A-Za-z0-9_\-\[\]\.]+)\s*$"),
+    # banner do cliente (condebug): 'Map: tell' — nunca casava antes e por
+    # isso o piloto não via o primeiro mapa de cada boot do jogo
+    re.compile(r"^\s*[Mm]ap:\s*([A-Za-z0-9_\-\[\]\.]+)\s*$"),
 )
 
 

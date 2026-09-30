@@ -98,6 +98,23 @@ class MapLineTests(unittest.TestCase):
         self.assertIsNone(core.parse_map_token("maps list here"))
         self.assertIsNone(core.parse_map_token("remap of something"))
 
+    def test_banner_do_cliente_map_colon(self):
+        # formato real do cliente Insurgency com -condebug: banner de abertura
+        # do console.log tem a linha 'Map: <mapa>' (caso do usuário, mapa tell)
+        self.assertEqual(core.parse_map_token("Map: tell"), "tell")
+        self.assertEqual(core.parse_map_token("Map: sinjar_coop"), "sinjar_coop")
+        self.assertEqual(core.parse_map_token("map: market"), "market")
+
+    def test_banner_do_cliente_nao_casa_ruido(self):
+        # linhas do mesmo log que mencionam 'map' mas não são o banner
+        self.assertIsNone(
+            core.parse_map_token(
+                "env_cubemap used on world geometry without rebuilding map."
+            )
+        )
+        self.assertIsNone(core.parse_map_token("Server Number: 1"))
+        self.assertIsNone(core.parse_map_token("Map: "))
+
     def test_noise_lines(self):
         self.assertIsNone(core.parse_map_token("SV_Activate: players 8"))
         self.assertIsNone(core.parse_map_token(""))
@@ -160,6 +177,33 @@ class ConsoleTailTests(unittest.TestCase):
             b"junk\n" b'Loading map "market"\n' b"more junk\n" b"Host_NewGame on map market\n"
         )
         self.assertEqual(tail.map_tokens(lines), ["market", "market"])
+
+    def test_log_real_do_cliente_insurgency(self):
+        # caso real do usuário (aba Sistema: piloto 'ok' mas nada trocava):
+        # o único sinal de mapa no console.log do cliente é o banner 'Map: tell'
+        log = (
+            b"Insurgency\n"
+            b"Map: tell\n"
+            b"Players: 1 (0 bots) / 32 humans\n"
+            b"Build: 9810\n"
+            b"Server Number: 1\n"
+            b"\n"
+            b"\n"
+            b"env_cubemap used on world geometry without rebuilding map."
+            b" . ignoring: maps/window/ir_window06_mask\n"
+            b"ShaderAPIDX8::CreateD3DTexture: D3DERR_INVALIDCALL\n"
+            b"SignalXWriteOpportunity(3)\n"
+            b'Attempted to precache unknown particle system "blood_dismember_limb"!\n'
+            b"[CWorkshopItem] gm260923bbb [3807102970] installed!\n"
+            b"Skipping existing file scripts/theaters/gm260923b_push.theater.\n"
+            b"The server is using sv_pure 0.  (Enforcing consistency for select files only)\n"
+        )
+        tail = core.ConsoleTail()
+        tokens = tail.map_tokens(tail.feed(log))
+        self.assertEqual(tokens, ["tell"])
+        profile = core.match_map_profile(tokens[-1])
+        self.assertEqual(profile.id, 22)
+        self.assertEqual(profile.name, "Tell")
 
     def test_empty_feed(self):
         tail = core.ConsoleTail()
