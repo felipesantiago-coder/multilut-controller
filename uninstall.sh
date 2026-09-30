@@ -29,6 +29,10 @@ esac
 if [ -d "$APP_DIR" ]; then
   rm -r -- "$APP_DIR"
 fi
+CLI_FILE="$DATA_ROOT/bin/multilut-ctl"
+if [ -f "$CLI_FILE" ]; then
+  rm -- "$CLI_FILE"
+fi
 if [ -f "$DESKTOP_FILE" ]; then
   rm -- "$DESKTOP_FILE"
 fi

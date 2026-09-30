@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import threading
+from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -28,6 +30,15 @@ import multilut_core as core
 BASE_DIR = Path(__file__).resolve().parent
 BUNDLE_DIR = BASE_DIR / "bundle"
 MAP_IMAGE_DIR = BASE_DIR / "assets" / "maps"
+
+ORIGIN_LABELS = {
+    "manual": "Manual",
+    "auto-map": "Piloto automático",
+    "auto-launch": "Início do jogo",
+    "cli": "CLI",
+    "hotkey": "Atalho global",
+    "external": "Troca externa",
+}
 
 
 CSS = b"""
@@ -245,6 +256,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.shader_valid = False
         self.file_monitor = None
         self._programmatic_selection = False
+        self._game_was_running = None
+        self._shader_was_valid = False
 
         self.toast_overlay = Adw.ToastOverlay()
         toolbar = Adw.ToolbarView()
@@ -301,6 +314,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         page_profiles = self.view_stack.add_titled(paned, "profiles", "Perfis")
         page_profiles.set_icon_name("view-grid-symbolic")
+        page_history = self.view_stack.add_titled(
+            self.build_history_page(), "history", "Histórico"
+        )
+        page_history.set_icon_name("document-open-recent-symbolic")
         body.append(self.view_stack)
 
         toolbar.set_content(body)
@@ -312,6 +329,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         if window_state.get("maximized"):
             self.maximize()
         GLib.timeout_add_seconds(2, self.refresh_game_status)
+        GLib.timeout_add_seconds(6, self._check_updates_once)
         self.start_file_monitor()
 
     # ------------------------------------------------------------ adaptação à tela
@@ -416,25 +434,67 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         scroller.set_child(self.profile_list)
         sidebar.append(scroller)
 
-        auto_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        auto_box.set_margin_start(16)
-        auto_box.set_margin_end(16)
-        auto_box.set_margin_top(8)
-        auto_box.set_margin_bottom(14)
-        auto_label = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-        auto_title = Gtk.Label(label="Aplicar ao selecionar", xalign=0)
-        auto_hint = Gtk.Label(label="Salva o arquivo imediatamente", xalign=0)
-        auto_hint.add_css_class("category-label")
-        auto_label.append(auto_title)
-        auto_label.append(auto_hint)
-        auto_label.set_hexpand(True)
-        self.auto_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
-        self.auto_switch.set_active(bool(self.config.get("auto_apply", False)))
-        self.auto_switch.connect("notify::active", self.on_auto_changed)
-        auto_box.append(auto_label)
-        auto_box.append(self.auto_switch)
-        sidebar.append(auto_box)
+        toggles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        toggles.set_margin_start(16)
+        toggles.set_margin_end(16)
+        toggles.set_margin_top(4)
+        toggles.set_margin_bottom(14)
+        toggles.append(
+            self._build_toggle_row(
+                "Aplicar ao selecionar",
+                "Salva o arquivo imediatamente",
+                bool(self.config.get("auto_apply", False)),
+                self.on_auto_changed,
+                "auto_switch",
+            )
+        )
+        toggles.append(
+            self._build_toggle_row(
+                "Notificar ao trocar de perfil",
+                "Aviso discreto do desktop quando a troca vier da automação",
+                bool(self.config.get("notify_changes", False)),
+                self.on_notify_changed,
+                "notify_switch",
+            )
+        )
+        toggles.append(
+            self._build_toggle_row(
+                "Aplicar último perfil ao abrir o jogo",
+                "Detecta a inicialização do Insurgency e aplica o último perfil",
+                bool(self.config.get("auto_apply_on_launch", False)),
+                self.on_auto_launch_changed,
+                "auto_launch_switch",
+            )
+        )
+        sidebar.append(toggles)
         return sidebar
+
+    def _build_toggle_row(
+        self,
+        title: str,
+        hint: str,
+        active: bool,
+        callback,
+        attr_name: str,
+    ) -> Gtk.Widget:
+        """Linha de interruptor da barra lateral (título + dica + switch)."""
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        box.set_margin_top(8)
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        title_label = Gtk.Label(label=title, xalign=0)
+        hint_label = Gtk.Label(label=hint, xalign=0)
+        hint_label.add_css_class("category-label")
+        hint_label.set_wrap(True)
+        labels.set_hexpand(True)
+        labels.append(title_label)
+        labels.append(hint_label)
+        switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        switch.set_active(active)
+        switch.connect("notify::active", callback)
+        setattr(self, attr_name, switch)
+        box.append(labels)
+        box.append(switch)
+        return box
 
     def build_detail(self) -> Gtk.Widget:
         scroller = Gtk.ScrolledWindow()
@@ -648,6 +708,167 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.config["auto_apply"] = switch.get_active()
         core.save_config(self.config)
 
+    def on_notify_changed(self, switch, _param) -> None:
+        self.config["notify_changes"] = switch.get_active()
+        core.save_config(self.config)
+        if switch.get_active():
+            self.toast("Notificações do desktop ativadas para trocas automáticas.")
+
+    def on_auto_launch_changed(self, switch, _param) -> None:
+        self.config["auto_apply_on_launch"] = switch.get_active()
+        core.save_config(self.config)
+
+    # ------------------------------------------------------------ histórico e notificações
+    def _record_history(self, origin: str, profile: core.Profile, detail: str = "") -> None:
+        """Registra a troca no histórico local e dispara a notificação configurada."""
+        core.append_history(
+            {
+                "profile_id": profile.id,
+                "profile_name": profile.name,
+                "origin": origin,
+                "detail": detail,
+                "shader": str(self.shader_path),
+            }
+        )
+        self.refresh_history()
+        self._notify_profile_change(profile, origin)
+
+    def _notify_profile_change(self, profile: core.Profile, origin: str) -> None:
+        """Notificação do desktop para trocas que não vieram da própria janela."""
+        if not self.config.get("notify_changes", False):
+            return
+        if origin == "manual":
+            return  # o toast da janela já basta para trocas manuais
+        origin_text = ORIGIN_LABELS.get(origin, origin)
+        notification = Gio.Notification.new("MultiLUT Controller")
+        notification.set_body(
+            f"{origin_text}: perfil ativo {profile.id:02d} — {profile.name}"
+        )
+        self.send_notification(None, notification)
+
+    def build_history_page(self) -> Gtk.Widget:
+        """Página do ViewStack com os registros locais de trocas de perfil."""
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        page.set_margin_start(26)
+        page.set_margin_end(26)
+        page.set_margin_top(20)
+        page.set_margin_bottom(20)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        title = Gtk.Label(label="Histórico de sessões", xalign=0)
+        title.add_css_class("hero-title")
+        title.set_hexpand(True)
+        clear_button = Gtk.Button(label="Limpar histórico")
+        clear_button.connect("clicked", self.on_clear_history)
+        header.append(title)
+        header.append(clear_button)
+        page.append(header)
+        hint = Gtk.Label(
+            label=(
+                "Registro local dos perfis aplicados, incluindo a origem da troca "
+                "(manual, piloto automático por mapa, início do jogo ou CLI)."
+            ),
+            xalign=0,
+            wrap=True,
+        )
+        hint.add_css_class("muted")
+        page.append(hint)
+        self.history_list = Gtk.ListBox()
+        self.history_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.history_list.add_css_class("card")
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_vexpand(True)
+        scroller.set_child(self.history_list)
+        page.append(scroller)
+        self.refresh_history()
+        return page
+
+    def refresh_history(self) -> None:
+        """Repopula a lista do histórico; chamado após cada troca registrada."""
+        history_list = getattr(self, "history_list", None)
+        if history_list is None:
+            return
+        child = history_list.get_first_child()
+        while child is not None:
+            next_child = child.get_next_sibling()
+            history_list.remove(child)
+            child = next_child
+        entries = core.read_history(limit=120)
+        if not entries:
+            empty = Gtk.ListBoxRow()
+            empty.set_selectable(False)
+            empty.set_activatable(False)
+            label = Gtk.Label(
+                label="Nenhuma troca registrada ainda.", xalign=0
+            )
+            label.set_margin_top(14)
+            label.set_margin_bottom(14)
+            label.set_margin_start(16)
+            label.add_css_class("muted")
+            empty.set_child(label)
+            history_list.append(empty)
+            return
+        for entry in reversed(entries):
+            history_list.append(self._history_row(entry))
+
+    def _history_row(self, entry: dict) -> Gtk.ListBoxRow:
+        ts_text = "—"
+        raw_ts = entry.get("ts")
+        if isinstance(raw_ts, str) and raw_ts:
+            try:
+                moment = datetime.fromisoformat(raw_ts).astimezone()
+                ts_text = moment.strftime("%d/%m %H:%M")
+            except ValueError:
+                ts_text = raw_ts[:19].replace("T", " ")
+        profile_id = entry.get("profile_id")
+        profile_name = str(entry.get("profile_name") or "Perfil")
+        origin = str(entry.get("origin") or "manual")
+        origin_text = ORIGIN_LABELS.get(origin, origin)
+        detail = str(entry.get("detail") or "")
+        text = f"{ts_text} · {profile_id:02d} — {profile_name} · {origin_text}"
+        if detail:
+            text += f" ({detail})"
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        row.set_activatable(False)
+        label = Gtk.Label(label=text, xalign=0)
+        label.set_ellipsize(Pango.EllipsizeMode.END)
+        label.set_margin_top(8)
+        label.set_margin_bottom(8)
+        label.set_margin_start(14)
+        label.set_margin_end(14)
+        if origin != "manual":
+            label.add_css_class("muted")
+        row.set_child(label)
+        return row
+
+    def on_clear_history(self, _button) -> None:
+        core.clear_history()
+        self.refresh_history()
+        self.toast("Histórico local apagado.")
+
+    # ------------------------------------------------------------ verificação de atualizações
+    def _check_updates_once(self) -> bool:
+        """Uma verificação discreta após a abertura; nunca bloqueia a UI."""
+        if not self.config.get("check_updates", True):
+            return GLib.SOURCE_REMOVE
+        threading.Thread(target=self._updates_thread, daemon=True).start()
+        return GLib.SOURCE_REMOVE
+
+    def _updates_thread(self) -> None:
+        release = core.fetch_latest_release()
+        if release is not None:
+            GLib.idle_add(self._announce_update, release)
+
+    def _announce_update(self, release: dict) -> bool:
+        if core.compare_versions(release["tag"], core.APP_VERSION):
+            self.toast(
+                f"Atualização disponível: {release['tag']} "
+                f"(instalada v{core.APP_VERSION})",
+                8,
+            )
+        return GLib.SOURCE_REMOVE
+
     def on_apply(self, _button) -> None:
         self.apply_selected_profile()
 
@@ -665,13 +886,15 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.start_file_monitor()
         if previous == self.selected_profile.id:
             self.toast(f"{self.selected_profile.name} já estava ativo.")
-        elif core.is_game_running():
-            self.toast(
-                f"{self.selected_profile.name} aplicado ao jogo em tempo real.",
-                4,
-            )
         else:
-            self.toast(f"Perfil {self.selected_profile.name} aplicado com segurança.")
+            self._record_history("manual", self.selected_profile)
+            if core.is_game_running():
+                self.toast(
+                    f"{self.selected_profile.name} aplicado ao jogo em tempo real.",
+                    4,
+                )
+            else:
+                self.toast(f"Perfil {self.selected_profile.name} aplicado com segurança.")
         return True
 
     def on_apply_and_launch(self, _button) -> None:
@@ -766,18 +989,35 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                 active = core.read_active_profile(self.shader_path)
             except core.MultiLUTError:
                 return
+            if (
+                self._shader_was_valid
+                and active != self.selected_profile.id
+                and active in core.PROFILE_BY_ID
+            ):
+                external = core.PROFILE_BY_ID[active]
+                self.toast(
+                    f"Perfil alterado externamente: {external.id:02d} — {external.name}",
+                    5,
+                )
+                self._notify_profile_change(external, "external")
             self.status_icon.set_from_icon_name("emblem-ok-symbolic")
             self.status_label.set_label(f"Ativo: {active:02d} — {core.PROFILE_BY_ID[active].name}")
             if select_active:
                 self.select_profile_id(active)
+            self._shader_was_valid = True
         else:
             self.shader_validation.remove_css_class("success")
             self.shader_validation.add_css_class("warning")
             self.status_icon.set_from_icon_name("dialog-warning-symbolic")
             self.status_label.set_label("Shader não localizado ou incompatível")
+            self._shader_was_valid = False
 
     def refresh_game_status(self) -> bool:
         running = core.is_game_running()
+        was_running = self._game_was_running
+        self._game_was_running = running
+        if was_running is not None and running and not was_running:
+            self._on_game_started()
         if running:
             self.game_label.set_label("Insurgency em execução — tempo real")
             self.apply_button.set_label("Aplicar agora")
@@ -789,6 +1029,27 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.launch_button.set_sensitive(self.shader_valid)
             self.status_strip.remove_css_class("status-live")
         return GLib.SOURCE_CONTINUE
+
+    def _on_game_started(self) -> None:
+        """O jogo acabou de abrir: opcionalmente aplica o último perfil."""
+        if not self.config.get("auto_apply_on_launch", False):
+            return
+        if not self.shader_valid:
+            return
+        last = self.config.get("last_profile")
+        if not isinstance(last, int) or last not in core.PROFILE_BY_ID:
+            return
+        try:
+            if core.read_active_profile(self.shader_path) == last:
+                return
+            core.set_active_profile(self.shader_path, last)
+        except (OSError, UnicodeError, core.MultiLUTError) as exc:
+            self.toast(f"Auto-aplicação no início do jogo falhou: {exc}", 6)
+            return
+        profile = core.PROFILE_BY_ID[last]
+        self.select_profile_id(last)
+        self._record_history("auto-launch", profile)
+        self.toast(f"{profile.name} aplicado no início do jogo.", 5)
 
     def start_file_monitor(self) -> None:
         if self.file_monitor is not None:

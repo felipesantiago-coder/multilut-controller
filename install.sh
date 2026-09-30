@@ -25,7 +25,12 @@ USER_DESKTOP_FILE="$USER_DESKTOP/MultiLUT_Controller.desktop"
 mkdir -p "$APP_DIR" "$DESKTOP_DIR" "$ICON_DIR"
 cp -a "$SOURCE_DIR/." "$APP_DIR/"
 chmod 755 "$APP_DIR/run.sh" "$APP_DIR/install.sh" "$APP_DIR/uninstall.sh"
-chmod 644 "$APP_DIR/multilut_controller.py" "$APP_DIR/multilut_core.py"
+chmod 644 "$APP_DIR/multilut_controller.py" "$APP_DIR/multilut_core.py" "$APP_DIR/multilut_ctl.py"
+
+BIN_DIR="$DATA_ROOT/bin"
+mkdir -p "$BIN_DIR"
+cp "$SOURCE_DIR/multilut_ctl.py" "$BIN_DIR/multilut-ctl"
+chmod 755 "$BIN_DIR/multilut-ctl"
 
 sed "s|@APP_DIR@|$APP_DIR|g" \
   "$SOURCE_DIR/com.felipesantiago.MultiLUTController.desktop.in" \
@@ -51,6 +56,7 @@ fi
 if python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")' >/dev/null 2>&1; then
   printf '%s\n' "MultiLUT Controller instalado com sucesso."
   printf '%s\n' "Abra-o pelo ícone da área de trabalho ou pelo menu de aplicativos."
+  printf '%s\n' "CLI instalada em $BIN_DIR/multilut-ctl (use: multilut-ctl --help)."
 else
   printf '%s\n' "O aplicativo foi instalado, mas faltam dependências gráficas."
   printf '%s\n' "No Centro de Programas do Solus, instale: PyGObject para Python 3, GTK 4 e libadwaita."

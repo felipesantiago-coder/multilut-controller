@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import os
@@ -12,10 +13,16 @@ import shutil
 import subprocess
 import tempfile
 import unicodedata
+import urllib.error
+import urllib.request
 from typing import Iterable
 
 
 APP_ID = "com.felipesantiago.MultiLUTController"
+APP_VERSION = "1.8.0"
+RELEASES_API_URL = (
+    "https://api.github.com/repos/felipesantiago-coder/multilut-controller/releases/latest"
+)
 STEAM_APP_ID = "222880"
 PROFILE_PATTERN = re.compile(
     r"^(?P<indent>[ \t]*)#define[ \t]+ACTIVE_LUT_PROFILE[ \t]+"
@@ -345,3 +352,209 @@ def copy_bundle_assets(bundle_root: Path | str) -> tuple[Path, Path]:
 
 def profile_names(profiles: Iterable[Profile] = PROFILES) -> list[str]:
     return [f"{profile.id:02d} — {profile.name}" for profile in profiles]
+
+
+# ------------------------------------------------------------ histórico de sessões
+def history_path() -> Path:
+    return Path.home() / ".config/multilut-controller/history.jsonl"
+
+
+def append_history(entry: dict) -> None:
+    """Registra um evento (perfil aplicado) no histórico local (JSONL)."""
+    path = history_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = dict(entry)
+    record.setdefault(
+        "ts", datetime.now(timezone.utc).isoformat(timespec="seconds")
+    )
+    try:
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        return
+    _trim_history(path)
+
+
+def _trim_history(path: Path, keep: int = 1000, max_lines: int = 2000) -> None:
+    """Mantém o histórico enxuto: acima de max_lines, guarda as últimas keep."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    if len(lines) <= max_lines:
+        return
+    content = "\n".join(lines[-keep:]) + "\n"
+    try:
+        _atomic_write(path, content, 0o600)
+    except OSError:
+        pass
+
+
+def read_history(limit: int = 100) -> list[dict]:
+    """Entradas mais recentes primeiro (mais novas no fim da leitura)."""
+    path = history_path()
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    entries: list[dict] = []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict):
+            entries.append(data)
+            if len(entries) >= limit:
+                break
+    return entries
+
+
+def clear_history() -> None:
+    try:
+        history_path().unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+# ------------------------------------------------------------ atualizações
+def normalize_version(tag: str) -> tuple[int, ...] | None:
+    """"v1.10.2", "1.9" etc. viram tupla comparável; None se não houver dígitos."""
+    text = str(tag).strip().casefold().lstrip("v")
+    numbers: list[int] = []
+    for part in re.split(r"[.\-+]", text):
+        if part.isdigit():
+            numbers.append(int(part))
+        else:
+            digits = ""
+            for char in part:
+                if char.isdigit():
+                    digits += char
+                else:
+                    break
+            if digits:
+                numbers.append(int(digits))
+            elif numbers:
+                break
+    return tuple(numbers) if numbers else None
+
+
+def compare_versions(candidate: str, current: str) -> bool:
+    """True quando candidate é estritamente mais nova que current."""
+    left = normalize_version(candidate)
+    right = normalize_version(current)
+    if left is None or right is None:
+        return False
+    width = max(len(left), len(right))
+    left += (0,) * (width - len(left))
+    right += (0,) * (width - len(right))
+    return left > right
+
+
+def fetch_latest_release(timeout: float = 6.0) -> dict | None:
+    """Consulta a release mais recente no GitHub; None em qualquer falha."""
+    request = urllib.request.Request(
+        RELEASES_API_URL,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "MultiLUTController/" + APP_VERSION,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, urllib.error.URLError, UnicodeError):
+        return None
+    if not isinstance(data, dict) or not data.get("tag_name"):
+        return None
+    return {
+        "tag": str(data["tag_name"]),
+        "name": str(data.get("name") or data["tag_name"]),
+        "url": str(data.get("html_url") or ""),
+    }
+
+
+# ------------------------------------------------------------ bibliotecas Steam
+VDF_LIBRARY_PATH_PATTERN = re.compile(r'"path"[ \t]*"([^"]+)"')
+
+
+def steam_roots() -> list[Path]:
+    roots: list[Path] = []
+    for candidate in (
+        Path.home() / ".steam/steam",
+        Path.home() / ".local/share/Steam",
+    ):
+        if candidate.is_dir() and candidate not in roots:
+            roots.append(candidate)
+    return roots
+
+
+def steam_libraries() -> list[Path]:
+    """Raízes de biblioteca: libraryfolders.vdf + as raízes padrão."""
+    libraries: list[Path] = []
+    for root in steam_roots():
+        steamapps = root / "steamapps"
+        if steamapps.is_dir() and steamapps not in libraries:
+            libraries.append(steamapps)
+        vdf = steamapps / "libraryfolders.vdf"
+        if not vdf.is_file():
+            continue
+        try:
+            text = vdf.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for match in VDF_LIBRARY_PATH_PATTERN.finditer(text):
+            raw = match.group(1).replace("\\\\", "/")
+            candidate = Path(raw)
+            apps = candidate / "steamapps"
+            if apps.is_dir() and apps not in libraries:
+                libraries.append(apps)
+    return libraries
+
+
+def find_game_roots() -> list[Path]:
+    """Instalações plausíveis do Insurgency (2014); a configurada vem primeiro.
+
+    O jogo pode estar como <library>/steamapps/common/insurgency2/insurgency
+    (layout aninhado), como .../common/insurgency ou .../common/insurgency2.
+    """
+    candidates: list[Path] = []
+    configured = load_config().get("game_dir")
+    if isinstance(configured, str) and configured.strip():
+        candidates.append(Path(configured).expanduser())
+    for apps in steam_libraries():
+        common = apps / "common"
+        candidates.append(common / "insurgency2/insurgency")
+        candidates.append(common / "insurgency")
+        candidates.append(common / "insurgency2")
+    seen: set[Path] = set()
+    roots: list[Path] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            if candidate.is_dir():
+                roots.append(candidate)
+        except OSError:
+            continue
+    return roots
+
+
+def find_console_log() -> Path | None:
+    """console.log do jogo (exige -condebug na opção de inicialização)."""
+    for root in find_game_roots():
+        candidate = root / "console.log"
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
