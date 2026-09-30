@@ -132,6 +132,19 @@ AUTOMACAO E INTEGRACAO
   automaticamente.
 - Trocas externas: mudancas feitas fora da janela (por exemplo
   "multilut-ctl set") sao percebidas pelo aplicativo via monitor de arquivo.
+- Piloto automatico por mapa: com o interruptor ligado, o aplicativo acompanha
+  o console.log do jogo (o monitor e rearmado quando o jogo recria o arquivo)
+  e, ao detectar o mapa carregado (ex.: 'Loading map "sinjar"'), aplica
+  automaticamente o perfil daquele mapa. Requer -condebug na opcao de
+  inicializacao (a pagina Sistema diagnostica e corrige isso). A troca entra
+  no historico com a origem "Piloto automatico".
+- Atalho global de proximo perfil: registra um atalho do GNOME pelo portal
+  org.freedesktop.portal.GlobalShortcuts (GNOME 46+). Ao ligar o interruptor,
+  o GNOME abre o dialogo para confirmar/alterar a combinacao sugerida
+  (Ctrl+Alt+L). O atalho aplica o proximo perfil (0 a 24, ciclando) mesmo
+  quando a janela nao esta em foco; a troca entra no historico com a origem
+  "Atalho global". Sem portal na sessao (ou recusa), o interruptor volta para
+  desligado com um aviso — nada quebra.
 - Verificador de atualizacoes: o aplicativo consulta a release mais recente
   no GitHub em segundo plano e avisa com um toast quando existe versao nova;
   a pagina Sistema tem o botao "Verificar atualizacoes agora".
@@ -244,7 +257,12 @@ O nucleo foi testado para leitura, alteracao, backup, restauracao, recusa de
 perfil invalido, validacao do shader, ordenacao alfabetica dos perfis, as
 duas secoes da lista, historico, versionamento, bibliotecas Steam, CLI de
 ponta a ponta, cartoes de mapa, opcoes de inicializacao do Steam (leitura e
-escrita com backup), diagnostico e backup do aplicativo — 55 testes e 18
-subtestes (tests/test_core.py, tests/test_lote1.py e tests/test_lote2.py).
-A interface foi verificada em GTK real sob Xvfb; o teste visual final no seu
-ambiente GNOME/Wayland continua recomendado.
+escrita com backup), diagnostico, backup do aplicativo, piloto automatico por
+mapa (leitura incremental do console, casamento de mapa/perfil, ciclo de
+perfis) e atalho global (ciclo e registro no historico) — 78 testes e 18
+subtestes (tests/test_core.py, tests/test_lote1.py, tests/test_lote2.py e
+tests/test_lote3.py).
+A interface foi verificada em GTK real sob Xvfb, incluindo o piloto
+automatico de ponta a ponta (linha de console → troca de perfil) e a falha
+graciosa do atalho global sem portal; o teste visual final no seu ambiente
+GNOME/Wayland continua recomendado.

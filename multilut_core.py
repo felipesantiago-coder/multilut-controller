@@ -558,3 +558,96 @@ def find_console_log() -> Path | None:
         except OSError:
             continue
     return None
+
+
+# ------------------------------------------------------------ piloto automático por mapa
+# Padrões de linha do console (Source engine) que revelam o mapa carregado.
+MAP_LINE_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r'Loading map "([^"\s]+)"'),
+    re.compile(r"Host_NewGame on map (\S+)"),
+    re.compile(r"Host_Changelevel\s*\(\s*[^,()]+,\s*([^\s,()]+)"),
+    re.compile(r"^\s*map\s+([A-Za-z0-9_\-\[\]\.]+)\s*$"),
+)
+
+
+def parse_map_token(line: str) -> str | None:
+    """Token do mapa carregado em uma linha do console, ou None."""
+    for pattern in MAP_LINE_PATTERNS:
+        match = pattern.search(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def match_map_profile(token: str | None) -> Profile | None:
+    """Perfil de mapa correspondente ao nome do mapa carregado, ou None.
+
+    "market_coop" casa com Market, "sinjar_night" com Sinjar. O casamento é
+    por partes do nome (hífen/underline/colchetes separam) e, em segundo
+    lugar, por prefixo do token inteiro.
+    """
+    if not token:
+        return None
+    text = str(token).strip().strip('"').casefold()
+    if not text:
+        return None
+    parts = [part for part in re.split(r"[^a-z0-9]+", text) if part]
+    for profile in PROFILES:
+        slug = map_image_slug(profile)
+        if slug is not None and slug in parts:
+            return profile
+    for profile in PROFILES:
+        slug = map_image_slug(profile)
+        if slug is not None and text.startswith(slug):
+            rest = text[len(slug) :]
+            if not rest or not rest[0].isalnum():
+                return profile
+    return None
+
+
+class ConsoleTail:
+    """Leitor incremental de console.log por deslocamento de bytes.
+
+    Guarda só a posição lida e o fragmento parcial da última linha; cada
+    `feed` devolve as linhas completas novas. Suporta truncamento (o jogo
+    recria o console.log a cada boot) via `reset`.
+    """
+
+    def __init__(self) -> None:
+        self.offset = 0
+        self._buffer = b""
+
+    def reset(self) -> None:
+        self.offset = 0
+        self._buffer = b""
+
+    def feed(self, data: bytes) -> list[str]:
+        if not data:
+            return []
+        self.offset += len(data)
+        self._buffer += data
+        chunks = self._buffer.split(b"\n")
+        self._buffer = chunks.pop()
+        lines: list[str] = []
+        for chunk in chunks:
+            lines.append(chunk.decode("utf-8", errors="ignore").rstrip("\r"))
+        return lines
+
+    def map_tokens(self, lines: Iterable[str]) -> list[str]:
+        tokens: list[str] = []
+        for line in lines:
+            token = parse_map_token(line)
+            if token:
+                tokens.append(token)
+        return tokens
+
+
+def next_profile_id(current: int, step: int = 1) -> int:
+    """Próximo perfil na ordem dos ids (0 a 24, ciclando)."""
+    if current not in PROFILE_BY_ID:
+        raise MultiLUTError(f"Perfil fora do intervalo permitido: {current}")
+    if step == 0:
+        return current
+    ids = sorted(PROFILE_BY_ID)
+    index = ids.index(current)
+    return ids[(index + step) % len(ids)]

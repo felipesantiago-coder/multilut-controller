@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -40,6 +41,13 @@ ORIGIN_LABELS = {
     "hotkey": "Atalho global",
     "external": "Troca externa",
 }
+
+# Portal de atalhos globais (org.freedesktop.portal.GlobalShortcuts; GNOME 46+)
+PORTAL_BUS_NAME = "org.freedesktop.portal.Desktop"
+PORTAL_OBJECT_PATH = "/org/freedesktop/portal/desktop"
+GLOBAL_SHORTCUTS_IFACE = "org.freedesktop.portal.GlobalShortcuts"
+HOTKEY_SHORTCUT_ID = "multilut-next"
+HOTKEY_PREFERRED = "<Control><Alt>l"
 
 
 CSS = b"""
@@ -259,6 +267,17 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self._programmatic_selection = False
         self._game_was_running = None
         self._shader_was_valid = False
+        # piloto automático por mapa (console.log)
+        self._console_monitor = None
+        self._console_path = None
+        self._console_tail = None
+        self._console_debounce_id = None
+        # atalho global (portal)
+        self._hotkey_bus = None
+        self._hotkey_session = None
+        self._hotkey_signal_ids: list[int] = []
+        self._hotkey_thread = None
+        self._hotkey_applying = False
 
         self.toast_overlay = Adw.ToastOverlay()
         toolbar = Adw.ToolbarView()
@@ -337,6 +356,9 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         GLib.timeout_add_seconds(2, self.refresh_game_status)
         GLib.timeout_add_seconds(6, self._check_updates_once)
         self.start_file_monitor()
+        self.start_console_monitor()
+        if bool(self.config.get("global_shortcut", False)):
+            self._register_global_shortcut()
 
     # ------------------------------------------------------------ adaptação à tela
     def _fit_size_to_monitor(self, width: int, height: int) -> tuple[int, int]:
@@ -470,6 +492,26 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                 bool(self.config.get("auto_apply_on_launch", False)),
                 self.on_auto_launch_changed,
                 "auto_launch_switch",
+            )
+        )
+        toggles.append(
+            self._build_toggle_row(
+                "Piloto automático por mapa",
+                "Acompanha o console.log e aplica o perfil do mapa carregado "
+                "(requer -condebug)",
+                bool(self.config.get("auto_map_switch", False)),
+                self.on_auto_map_changed,
+                "auto_map_switch",
+            )
+        )
+        toggles.append(
+            self._build_toggle_row(
+                "Atalho global de próximo perfil",
+                "Registra um atalho do GNOME (portal) para trocar de perfil "
+                "de qualquer lugar; padrão sugerido Ctrl+Alt+L",
+                bool(self.config.get("global_shortcut", False)),
+                self.on_hotkey_changed,
+                "hotkey_switch",
             )
         )
         sidebar.append(toggles)
@@ -723,6 +765,341 @@ class MultiLUTWindow(Adw.ApplicationWindow):
     def on_auto_launch_changed(self, switch, _param) -> None:
         self.config["auto_apply_on_launch"] = switch.get_active()
         core.save_config(self.config)
+
+    def on_auto_map_changed(self, switch, _param) -> None:
+        self.config["auto_map_switch"] = switch.get_active()
+        core.save_config(self.config)
+        if switch.get_active():
+            self._ensure_console_monitor()
+            if core.find_console_log() is None:
+                self.toast(
+                    "console.log não encontrado; adicione -condebug à opção "
+                    "do jogo (a página Sistema corrige isso).",
+                    6,
+                )
+            else:
+                self.toast("Piloto automático por mapa ativado.")
+
+    def on_hotkey_changed(self, switch, _param) -> None:
+        self.config["global_shortcut"] = switch.get_active()
+        core.save_config(self.config)
+        if switch.get_active():
+            self._register_global_shortcut()
+        else:
+            self._close_global_session()
+
+    # ------------------------------------------------------------ piloto automático por mapa
+    def start_console_monitor(self) -> None:
+        """Arma o monitor do console.log quando ele existir."""
+        self._ensure_console_monitor()
+
+    def _ensure_console_monitor(self) -> None:
+        if self._console_monitor is not None:
+            return
+        console = core.find_console_log()
+        if console is None:
+            return
+        try:
+            file = Gio.File.new_for_path(str(console))
+            monitor = file.monitor_file(Gio.FileMonitorFlags.NONE, None)
+            monitor.connect("changed", self._on_console_changed)
+            self._console_monitor = monitor
+            self._console_path = console
+            tail = core.ConsoleTail()
+            try:
+                tail.offset = console.stat().st_size  # ignora conteúdo antigo
+            except OSError:
+                tail.offset = 0
+            self._console_tail = tail
+        except GLib.Error:
+            self._console_monitor = None
+
+    def _on_console_changed(self, _monitor, _file, _other, event_type) -> None:
+        if event_type in (
+            Gio.FileMonitorEvent.DELETED,
+            Gio.FileMonitorEvent.MOVED_OUT,
+        ):
+            # o jogo recria o console.log a cada boot: rearma e zera o offset
+            GLib.idle_add(self._rearm_console_monitor)
+            return
+        if event_type not in (
+            Gio.FileMonitorEvent.CHANGES_DONE_HINT,
+            Gio.FileMonitorEvent.CREATED,
+            Gio.FileMonitorEvent.MOVED_IN,
+            Gio.FileMonitorEvent.CHANGED,
+        ):
+            return
+        if self._console_debounce_id is not None:
+            GLib.source_remove(self._console_debounce_id)
+        self._console_debounce_id = GLib.timeout_add(400, self._drain_console_log)
+
+    def _rearm_console_monitor(self) -> bool:
+        if self._console_monitor is not None:
+            self._console_monitor.cancel()
+            self._console_monitor = None
+        self._console_path = None
+        self._console_tail = None
+        self._ensure_console_monitor()
+        return GLib.SOURCE_REMOVE
+
+    def _drain_console_log(self) -> bool:
+        """Lê as linhas novas do console.log e reage ao último mapa carregado."""
+        self._console_debounce_id = None
+        tail = self._console_tail
+        path = self._console_path
+        if tail is None or path is None:
+            return GLib.SOURCE_REMOVE
+        try:
+            size = path.stat().st_size
+            if size < tail.offset:
+                tail.reset()  # truncado: o jogo recriou o arquivo
+            with path.open("rb") as stream:
+                stream.seek(tail.offset)
+                data = stream.read(262144)
+            lines = tail.feed(data)
+        except OSError:
+            return GLib.SOURCE_REMOVE
+        latest = None
+        for token in tail.map_tokens(lines):
+            latest = token
+        if latest:
+            profile = core.match_map_profile(latest)
+            if profile is not None:
+                self._on_map_detected(profile, latest)
+        return GLib.SOURCE_REMOVE
+
+    def _on_map_detected(self, profile: core.Profile, token: str) -> None:
+        """Mapa carregado no jogo: aplica o perfil dele se o piloto está ligado."""
+        if not self.config.get("auto_map_switch", False):
+            return
+        if not self.shader_valid:
+            return
+        try:
+            active = core.read_active_profile(self.shader_path)
+        except core.MultiLUTError:
+            return
+        if active == profile.id:
+            return
+        try:
+            core.set_active_profile(self.shader_path, profile.id)
+        except (OSError, UnicodeError, core.MultiLUTError) as exc:
+            self.toast(f"Piloto automático falhou: {exc}", 6)
+            return
+        self.config["shader_path"] = str(self.shader_path)
+        self.config["last_profile"] = profile.id
+        core.save_config(self.config)
+        self.select_profile_id(profile.id)
+        self.refresh_shader_status()
+        self._record_history("auto-map", profile, detail=token)
+        self.toast(f"Piloto automático: {token} → {profile.name}", 5)
+
+    # ------------------------------------------------------------ atalho global (portal)
+    def _register_global_shortcut(self) -> None:
+        if self._hotkey_thread is not None and self._hotkey_thread.is_alive():
+            return
+        self._hotkey_thread = threading.Thread(
+            target=self._global_shortcut_setup, daemon=True
+        )
+        self._hotkey_thread.start()
+
+    def _global_shortcut_setup(self) -> None:
+        """Diálogo completo do portal GlobalShortcuts, em thread própria."""
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            self._hotkey_bus = bus
+            sender = bus.get_unique_name().lstrip(":").replace(".", "_")
+            token = f"multilut{int(time.time() * 1000) % 100000000}"
+            request_path = (
+                f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
+            )
+            done = threading.Event()
+            outcome: dict = {}
+
+            def on_response(_conn, _sender, _path, _iface, _signal, params):
+                try:
+                    response = int(params[0])
+                    raw = params[1] if len(params) > 1 else None
+                    values = (
+                        raw.unpack() if hasattr(raw, "unpack") else dict(raw or {})
+                    )
+                except (IndexError, TypeError, ValueError):
+                    response, values = 1, {}
+                outcome["response"] = response
+                outcome["values"] = values if isinstance(values, dict) else {}
+                done.set()
+
+            sid = bus.signal_subscribe(
+                None,
+                "org.freedesktop.portal.Request",
+                "Response",
+                request_path,
+                None,
+                Gio.DBusSignalFlags.NONE,
+                on_response,
+            )
+            self._hotkey_signal_ids.append(sid)
+
+            create_reply = bus.call_sync(
+                PORTAL_BUS_NAME,
+                PORTAL_OBJECT_PATH,
+                GLOBAL_SHORTCUTS_IFACE,
+                "CreateSession",
+                GLib.Variant(
+                    "(a{sv})",
+                    (
+                        {
+                            "handle_token": GLib.Variant("s", token),
+                            "session_handle_token": GLib.Variant(
+                                "s", "multilut-controller"
+                            ),
+                        },
+                    ),
+                ),
+                GLib.VariantType("(o)"),
+                Gio.DBusCallFlags.NONE,
+                8000,
+                None,
+            )
+            create_reply.unpack()  # valida a resposta do portal
+            if not done.wait(10):
+                raise GLib.Error(
+                    "o portal de atalhos globais não respondeu"
+                )
+            if outcome.get("response") != 0:
+                raise GLib.Error("sessão do portal recusada")
+            session_handle = outcome["values"].get("session_handle")
+            if not session_handle:
+                raise GLib.Error("portal não devolveu a sessão")
+            self._hotkey_session = str(session_handle)
+
+            sid = bus.signal_subscribe(
+                PORTAL_BUS_NAME,
+                GLOBAL_SHORTCUTS_IFACE,
+                "Activated",
+                None,
+                None,
+                Gio.DBusSignalFlags.NONE,
+                self._on_portal_activated,
+            )
+            self._hotkey_signal_ids.append(sid)
+
+            done.clear()
+            outcome.clear()
+            bus.call_sync(
+                PORTAL_BUS_NAME,
+                PORTAL_OBJECT_PATH,
+                GLOBAL_SHORTCUTS_IFACE,
+                "BindShortcuts",
+                GLib.Variant(
+                    "(oa(sass)a{sv})",
+                    (
+                        self._hotkey_session,
+                        [
+                            (
+                                HOTKEY_SHORTCUT_ID,
+                                HOTKEY_PREFERRED,
+                                "Aplicar o próximo perfil do MultiLUT",
+                            )
+                        ],
+                        "",
+                        {"handle_token": GLib.Variant("s", token)},
+                    ),
+                ),
+                GLib.VariantType("(o)"),
+                Gio.DBusCallFlags.NONE,
+                60000,
+                None,
+            )
+            # resposta do diálogo do GNOME (usuário confirma a tecla)
+            if not done.wait(120):
+                raise GLib.Error("o diálogo do atalho não foi concluído")
+            if outcome.get("response") != 0:
+                raise GLib.Error("atalho não confirmado")
+            GLib.idle_add(
+                self.toast,
+                "Atalho global registrado. Use o atalho para aplicar o "
+                "próximo perfil.",
+                6,
+            )
+        except (GLib.Error, OSError, ValueError) as exc:
+            self._close_global_session()
+            message = str(exc.message) if hasattr(exc, "message") else str(exc)
+            GLib.idle_add(self._disable_hotkey_switch, message)
+
+    def _on_portal_activated(self, _conn, _sender, path, _iface, _signal, params):
+        session = self._hotkey_session
+        if session is not None and path != session:
+            return
+        if not params or len(params) < 2:
+            return
+        try:
+            shortcut_id = str(params[1])
+        except (IndexError, TypeError):
+            return
+        if shortcut_id != HOTKEY_SHORTCUT_ID:
+            return
+        GLib.idle_add(self._apply_next_profile_hotkey)
+
+    def _apply_next_profile_hotkey(self) -> bool:
+        """Aplica o próximo perfil (0–24 ciclando) vindo do atalho global."""
+        if self._hotkey_applying:
+            return GLib.SOURCE_REMOVE
+        self._hotkey_applying = True
+        try:
+            if not self.shader_valid:
+                self.toast("Atalho global: shader inválido.", 5)
+                return GLib.SOURCE_REMOVE
+            try:
+                active = core.read_active_profile(self.shader_path)
+                target = core.PROFILE_BY_ID[core.next_profile_id(active)]
+                core.set_active_profile(self.shader_path, target.id)
+            except (OSError, UnicodeError, core.MultiLUTError) as exc:
+                self.toast(f"Atalho global falhou: {exc}", 6)
+                return GLib.SOURCE_REMOVE
+            self.config["shader_path"] = str(self.shader_path)
+            self.config["last_profile"] = target.id
+            core.save_config(self.config)
+            self.select_profile_id(target.id)
+            self.refresh_shader_status()
+            self._record_history("hotkey", target)
+            self.toast(f"{target.name} aplicado pelo atalho global.")
+        finally:
+            self._hotkey_applying = False
+        return GLib.SOURCE_REMOVE
+
+    def _disable_hotkey_switch(self, reason: str) -> bool:
+        self.toast(f"Atalho global indisponível: {reason}", 7)
+        switch = getattr(self, "hotkey_switch", None)
+        if switch is not None:
+            switch.set_active(False)
+        return GLib.SOURCE_REMOVE
+
+    def _close_global_session(self) -> None:
+        session = self._hotkey_session
+        bus = self._hotkey_bus
+        if session is not None and bus is not None:
+            try:
+                bus.call_sync(
+                    PORTAL_BUS_NAME,
+                    session,
+                    "org.freedesktop.portal.Session",
+                    "Close",
+                    None,
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    3000,
+                    None,
+                )
+            except GLib.Error:
+                pass
+        for signal_id in self._hotkey_signal_ids:
+            try:
+                bus.signal_unsubscribe(signal_id)
+            except (GLib.Error, TypeError, AttributeError):
+                pass
+        self._hotkey_signal_ids = []
+        self._hotkey_session = None
+        self._hotkey_bus = None
 
     # ------------------------------------------------------------ histórico e notificações
     def _record_history(self, origin: str, profile: core.Profile, detail: str = "") -> None:
@@ -1121,6 +1498,14 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.auto_launch_switch.set_active(
                 bool(self.config.get("auto_apply_on_launch", False))
             )
+        if hasattr(self, "auto_map_switch"):
+            self.auto_map_switch.set_active(
+                bool(self.config.get("auto_map_switch", False))
+            )
+        if hasattr(self, "hotkey_switch"):
+            self.hotkey_switch.set_active(
+                bool(self.config.get("global_shortcut", False))
+            )
         self.start_file_monitor()
         self.refresh_shader_status(select_active=True)
         self.refresh_history()
@@ -1295,6 +1680,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         running = core.is_game_running()
         was_running = self._game_was_running
         self._game_was_running = running
+        self._ensure_console_monitor()
         if was_running is not None and running and not was_running:
             self._on_game_started()
         if running:
