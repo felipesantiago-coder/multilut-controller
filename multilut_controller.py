@@ -13,7 +13,7 @@ try:
     gi.require_version("Adw", "1")
     gi.require_version("Gdk", "4.0")
     gi.require_version("Pango", "1.0")
-    from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
+    from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 except (ImportError, ValueError) as exc:
     print(
         "MultiLUT Controller requer Python 3, PyGObject, GTK 4 e libadwaita.\n"
@@ -99,10 +99,18 @@ class MultiLUTWindow(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application):
         super().__init__(application=application)
         self.set_title("MultiLUT Controller")
-        self.set_default_size(1040, 700)
-        self.set_size_request(760, 560)
+        self.set_size_request(420, 400)
 
         self.config = core.load_config()
+        window_state = self.config.get("window")
+        if not isinstance(window_state, dict):
+            window_state = {}
+        start_w, start_h = self._fit_size_to_monitor(
+            int(window_state.get("width") or 1040),
+            int(window_state.get("height") or 700),
+        )
+        self.set_default_size(start_w, start_h)
+        self.connect("close-request", self.on_close_request)
         remembered = self.config.get("shader_path")
         candidates = core.find_shader_candidates()
         self.shader_path = Path(remembered).expanduser() if remembered else (
@@ -119,8 +127,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         self.view_stack = Adw.ViewStack()
         self.view_stack.set_vexpand(True)
-        switcher = Adw.ViewSwitcher(stack=self.view_stack, policy=Adw.ViewSwitcherPolicy.WIDE)
-        header.set_title_widget(switcher)
+        switcher_title = Adw.ViewSwitcherTitle()
+        switcher_title.set_stack(self.view_stack)
+        switcher_title.set_policy(Adw.ViewSwitcherPolicy.WIDE)
+        header.set_title_widget(switcher_title)
 
         self.restore_button = Gtk.Button.new_from_icon_name("edit-undo-symbolic")
         self.restore_button.set_tooltip_text("Restaurar último backup")
@@ -151,6 +161,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.status_label.set_hexpand(True)
         self.game_label = Gtk.Label(xalign=1)
         self.game_label.add_css_class("muted")
+        self.game_label.set_ellipsize(Pango.EllipsizeMode.START)
         inner_status.append(self.status_icon)
         inner_status.append(self.status_label)
         inner_status.append(self.game_label)
@@ -175,20 +186,98 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         body.append(self.view_stack)
 
+        self.switcher_bar = Adw.ViewSwitcherBar()
+        self.switcher_bar.set_stack(self.view_stack)
+        toolbar.add_bottom_bar(self.switcher_bar)
+        switcher_title.bind_property(
+            "title-visible",
+            self.switcher_bar,
+            "reveal",
+            GObject.BindingFlags.SYNC_CREATE | GObject.BindingFlags.INVERT_BOOLEAN,
+        )
+
         toolbar.set_content(body)
+        self.setup_adaptive_layout()
         self.toast_overlay.set_child(toolbar)
         self.set_content(self.toast_overlay)
 
         self.refresh_shader_status(select_active=True)
         self.refresh_game_status()
         self.refresh_scopes_page()
+        if window_state.get("maximized"):
+            self.maximize()
         GLib.timeout_add_seconds(2, self.refresh_game_status)
         self.start_file_monitor()
+
+    # ------------------------------------------------------------ adaptação à tela
+    def _fit_size_to_monitor(self, width: int, height: int) -> tuple[int, int]:
+        """Limita o tamanho pedido à área útil do monitor (pontos lógicos).
+
+        Respeita a escala do sistema (Wayland/HiDPI): a geometria do monitor
+        já vem em pontos lógicos, então o limite funciona igual em telas
+        normais e com escala fracionária.
+        """
+        min_w, min_h = 420, 400
+        width, height = max(min_w, width), max(min_h, height)
+        display = Gdk.Display.get_default()
+        if display is None:
+            return width, height
+        monitor = None
+        surface = self.get_surface()
+        if surface is not None and hasattr(display, "get_monitor_at_surface"):
+            monitor = display.get_monitor_at_surface(surface)
+        if monitor is None and hasattr(display, "get_monitors"):
+            monitors = display.get_monitors()
+            if monitors is not None and monitors.get_n_items() > 0:
+                monitor = monitors.get_item(0)
+        if monitor is None:
+            return width, height
+        geometry = monitor.get_geometry()
+        usable_w = max(min_w, int(geometry.width * 0.92))
+        usable_h = max(min_h, int(geometry.height * 0.92))
+        return min(width, usable_w), min(height, usable_h)
+
+    def on_close_request(self, _window) -> bool:
+        """Guarda o tamanho da janela para a próxima abertura."""
+        state = self.config.get("window")
+        if not isinstance(state, dict):
+            state = {}
+            self.config["window"] = state
+        state["width"], state["height"] = self.get_default_size()
+        state["maximized"] = bool(self.is_maximized())
+        try:
+            core.save_config(self.config)
+        except (OSError, core.MultiLUTError):
+            pass
+        return False
+
+    def setup_adaptive_layout(self) -> None:
+        """Em janelas estreitas, empilha as linhas largas (padrão libadwaita)."""
+        if not hasattr(Adw, "Breakpoint") or not hasattr(Adw, "BreakpointCondition"):
+            return
+        try:
+            breakpoint = Adw.Breakpoint.new(
+                Adw.BreakpointCondition.parse("max-width: 820px")
+            )
+        except Exception:
+            return
+        for row in (
+            self.detail_actions,
+            self.scopes_actions,
+            self.target_row,
+            self.preset_row,
+            self.scopes_manual_row,
+        ):
+            try:
+                breakpoint.add_setter(row, "orientation", Gtk.Orientation.VERTICAL)
+            except Exception:
+                return
+        self.add_breakpoint(breakpoint)
 
     def build_sidebar(self) -> Gtk.Widget:
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         sidebar.add_css_class("sidebar")
-        sidebar.set_size_request(300, -1)
+        sidebar.set_size_request(260, -1)
 
         heading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         heading.set_margin_start(16)
@@ -325,6 +414,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         actions.set_homogeneous(True)
+        self.detail_actions = actions
         self.apply_button = Gtk.Button(label="Aplicar perfil")
         self.apply_button.add_css_class("suggested-action")
         self.apply_button.connect("clicked", self.on_apply)
@@ -409,6 +499,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.scopes_path_label = Gtk.Label(xalign=0, wrap=True)
         self.scopes_path_label.add_css_class("muted")
         manual_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.scopes_manual_row = manual_row
         self.scopes_path_entry = Gtk.Entry(placeholder_text="Caminho manual, ex.: ~/.local/share/Steam/steamapps/common/insurgency2/insurgency")
         self.scopes_path_entry.set_hexpand(True)
         use_button = Gtk.Button(label="Usar este caminho")
@@ -433,6 +524,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         settings_inner.set_margin_bottom(16)
 
         target_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.target_row = target_row
         target_label = Gtk.Label(label="Ampliação máxima", xalign=0)
         target_label.set_size_request(190, -1)
         self.target_value_label = Gtk.Label(xalign=1)
@@ -450,6 +542,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         settings_inner.append(target_row)
 
         preset_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.preset_row = preset_row
         preset_label = Gtk.Label(label="Opções rápidas", xalign=0)
         preset_label.set_size_request(190, -1)
         preset_row.append(preset_label)
@@ -513,6 +606,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         content.append(settings_card)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.scopes_actions = actions
         self.scopes_apply_button = Gtk.Button(label="Ativar lunetas ampliadas")
         self.scopes_apply_button.add_css_class("suggested-action")
         self.scopes_apply_button.connect("clicked", self.on_scopes_apply)
