@@ -526,11 +526,13 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         note = Gtk.Label(
             label=(
-                "Como funciona: o jogo carrega o theater multilut_zoom quando o cvar "
-                "mp_theater_override está definido — pela opção de inicialização do "
-                "Steam (garantido), pelo autoexec.cfg (quando o jogo o executa) ou "
-                "manualmente pelo console: mp_theater_override multilut_zoom. Vale na "
-                "próxima partida hospedada por você (coop, prática ou servidor próprio)."
+                "Como funciona: o jogo escolhe o theater no início de cada partida "
+                "local. O aplicativo grava o theater multilut_zoom e ativa pelo "
+                "cfg/listenserver.cfg (lido pelo jogo a cada partida, solo "
+                "incluído), pela opção de inicialização do Steam e pelo "
+                "autoexec.cfg quando o jogo o executa. Comando manual no console "
+                "precisa de um mapa recarregado depois (changelevel) — no meio da "
+                "partida ele apenas reinicia a rodada."
             ),
             xalign=0,
             wrap=True,
@@ -583,12 +585,26 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.scopes_path_label.set_label(str(game_dir))
             if scopes.is_applied(game_dir):
                 target = scopes.applied_target(game_dir)
-                text = f"Ativo: lunetas ampliadas para {target:g}x."
-                self.scopes_status.remove_css_class("muted")
-                self.scopes_status.add_css_class("success")
+                if scopes.listenserver_zoom_enabled(game_dir):
+                    text = (
+                        f"Ativo: lunetas ampliadas para {target:g}x — o theater "
+                        "carrega no início de cada partida local (solo incluso)."
+                    )
+                    self.scopes_status.remove_css_class("muted")
+                    self.scopes_status.remove_css_class("warning")
+                    self.scopes_status.add_css_class("success")
+                else:
+                    text = (
+                        f"Theater gravado para {target:g}x, mas sem ativação "
+                        "automática — clique em “Ativar lunetas ampliadas” para "
+                        "o jogo carregar o theater nas partidas."
+                    )
+                    self.scopes_status.remove_css_class("success")
+                    self.scopes_status.add_css_class("warning")
             else:
                 text = "Padrão do jogo — nenhum theater customizado ativo."
                 self.scopes_status.remove_css_class("success")
+                self.scopes_status.remove_css_class("warning")
                 self.scopes_status.add_css_class("muted")
             self.scopes_status.set_label(text)
         else:
@@ -664,6 +680,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             scopes.set_autoexec_zoom(
                 self.scopes_game_dir, bool(self.scopes_autoexec_switch.get_active())
             )
+            scopes.set_listenserver_zoom(self.scopes_game_dir, True)
         except (OSError, core.MultiLUTError) as exc:
             self.toast(f"Não foi possível aplicar: {exc}", 8)
             return
@@ -677,8 +694,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self._persist_scopes_config()
         self.refresh_scopes_page()
         self.toast(
-            f"Lunetas ampliadas para {target:g}x. Reinicie o jogo para valer."
-            f"{launch_warning}",
+            f"Lunetas ampliadas para {target:g}x. Vale na próxima partida local: "
+            f"saia da partida atual e comece outra.{launch_warning}",
             8,
         )
 

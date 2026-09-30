@@ -37,6 +37,15 @@ AUTOEXEC_BEGIN = "// >>> MultiLUT Controller - lunetas ampliadas >>>"
 AUTOEXEC_END = "// <<< MultiLUT Controller - lunetas ampliadas <<<"
 AUTOEXEC_LINE = f'mp_theater_override "{THEATER_NAME}"'
 
+# Ativação por cfg/listenserver.cfg: o Insurgency executa esse arquivo ao
+# iniciar QUALQUER partida hospedada localmente (o modo solo também — é um
+# servidor local) ANTES de escolher o theater. Em instalações limpas o
+# arquivo nem existe — o console do jogo mostra "exec: couldn't exec
+# listenserver.cfg" — então criá-lo é seguro e é a ativação mais confiável:
+# vale já na próxima partida, sem depender do Steam, do autoexec.cfg ou de
+# comandos manuais no console.
+LISTENSERVER_LINE = f'mp_theater_override "{THEATER_NAME}"'
+
 STEAM_APP_ID = "222880"           # Insurgency na Steam
 LAUNCH_OPTION = f"+mp_theater_override {THEATER_NAME}"
 
@@ -285,7 +294,7 @@ def apply_zoom(game_dir: Path | str, target_mag: float,
 
 
 def revert_zoom(game_dir: Path | str) -> bool:
-    """Remove o theater gerado e a linha do autoexec. True se algo mudou."""
+    """Remove o theater e as linhas de ativação. True se algo mudou."""
     path = _validate_game_dir(game_dir)
     changed = False
     target = theater_path(path)
@@ -297,6 +306,9 @@ def revert_zoom(game_dir: Path | str) -> bool:
             raise MultiLUTError(f"Não foi possível remover o theater: {exc}") from exc
     if autoexec_zoom_enabled(path):
         set_autoexec_zoom(path, False)
+        changed = True
+    if listenserver_zoom_enabled(path):
+        set_listenserver_zoom(path, False)
         changed = True
     return changed
 
@@ -322,25 +334,80 @@ def autoexec_zoom_enabled(game_dir: Path | str) -> bool:
     return AUTOEXEC_BEGIN in text and AUTOEXEC_LINE in text
 
 
-def set_autoexec_zoom(game_dir: Path | str, enabled: bool) -> Path:
-    """Adiciona ou remove o bloco marcado no autoexec.cfg do jogo."""
-    path, text, mode = _read_autoexec(game_dir)
+def _write_marked_block(path: Path, line: str, enabled: bool) -> bool:
+    """Adiciona ou remove um bloco marcado com `line` no arquivo `path`.
+
+    O restante do arquivo é preservado. Ao desativar, se o arquivo ficar
+    vazio (era um arquivo criado por nós), ele é removido do disco.
+    Devolve True se o arquivo mudou.
+    """
+    if path.is_file():
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            mode = path.stat().st_mode & 0o777
+        except OSError as exc:
+            raise MultiLUTError(f"Não foi possível ler {path.name}: {exc}") from exc
+    else:
+        text, mode = "", 0o644
     pattern = re.compile(
         re.escape(AUTOEXEC_BEGIN) + r".*?" + re.escape(AUTOEXEC_END) + r"\n?",
         re.DOTALL,
     )
     cleaned = pattern.sub("", text).rstrip("\n")
     if enabled:
-        block = (
-            f"{AUTOEXEC_BEGIN}\n"
-            f"{AUTOEXEC_LINE}\n"
-            f"{AUTOEXEC_END}\n"
-        )
+        block = f"{AUTOEXEC_BEGIN}\n{line}\n{AUTOEXEC_END}\n"
         new_text = (cleaned + "\n\n" + block) if cleaned else block
     else:
         new_text = cleaned + "\n" if cleaned else ""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(path, new_text, mode)
+    if new_text == text:
+        return False
+    if new_text:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, new_text, mode)
+    else:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    return True
+
+
+def set_autoexec_zoom(game_dir: Path | str, enabled: bool) -> Path:
+    """Adiciona ou remove o bloco marcado no autoexec.cfg do jogo."""
+    path = autoexec_path(game_dir)
+    _write_marked_block(path, AUTOEXEC_LINE, enabled)
+    return path
+
+
+# --- Ativação por partida local (cfg/listenserver.cfg) -----------------------
+
+def listenserver_path(game_dir: Path | str) -> Path:
+    return Path(game_dir) / "cfg" / "listenserver.cfg"
+
+
+def listenserver_zoom_enabled(game_dir: Path | str) -> bool:
+    """True se o listenserver.cfg já ativa o theater nas partidas locais."""
+    path = listenserver_path(game_dir)
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return AUTOEXEC_BEGIN in text and LISTENSERVER_LINE in text
+
+
+def set_listenserver_zoom(game_dir: Path | str, enabled: bool) -> Path:
+    """Ativa o theater nas partidas locais via cfg/listenserver.cfg.
+
+    O jogo executa este arquivo no início de qualquer partida hospedada
+    por você (o modo solo incluído) e ANTES de escolher o theater — é o
+    gatilho que aparece no console como "Executing 'listenserver.cfg'".
+    Diferente do autoexec.cfg, isso funciona em todas as instalações e
+    dispensa reiniciar o jogo: a ativação vale na próxima partida.
+    """
+    path = listenserver_path(game_dir)
+    _write_marked_block(path, LISTENSERVER_LINE, enabled)
     return path
 
 

@@ -135,10 +135,12 @@ class ApplyRevertTests(unittest.TestCase):
     def test_revert_removes_theater_and_autoexec(self):
         scopes.apply_zoom(self.game, 12.0, ["optic_scope_7x"])
         scopes.set_autoexec_zoom(self.game, True)
+        scopes.set_listenserver_zoom(self.game, True)
         changed = scopes.revert_zoom(self.game)
         self.assertTrue(changed)
         self.assertFalse(scopes.is_applied(self.game))
         self.assertFalse(scopes.autoexec_zoom_enabled(self.game))
+        self.assertFalse(scopes.listenserver_zoom_enabled(self.game))
         # segunda reversão não tem mais o que fazer
         self.assertFalse(scopes.revert_zoom(self.game))
 
@@ -187,6 +189,60 @@ class AutoexecTests(unittest.TestCase):
     def test_missing_autoexec_means_disabled(self):
         self.autoexec.unlink()
         self.assertFalse(scopes.autoexec_zoom_enabled(self.game))
+
+
+class ListenserverTests(unittest.TestCase):
+    """Ativação por cfg/listenserver.cfg (executado a cada partida local)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.game = Path(self.tmp.name) / "insurgency"
+        (self.game / "cfg").mkdir(parents=True)
+        self.listenserver = self.game / "cfg" / "listenserver.cfg"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_creates_file_with_block(self):
+        self.assertFalse(scopes.listenserver_zoom_enabled(self.game))
+        scopes.set_listenserver_zoom(self.game, True)
+        text = self.listenserver.read_text(encoding="utf-8")
+        self.assertIn(scopes.LISTENSERVER_LINE, text)
+        self.assertIn(scopes.AUTOEXEC_BEGIN, text)
+        self.assertTrue(scopes.listenserver_zoom_enabled(self.game))
+
+    def test_existing_content_preserved(self):
+        self.listenserver.write_text(
+            "// config do servidor do jogador\nsv_cheats 0\n", encoding="utf-8"
+        )
+        scopes.set_listenserver_zoom(self.game, True)
+        text = self.listenserver.read_text(encoding="utf-8")
+        self.assertIn("sv_cheats 0", text)
+        self.assertIn(scopes.LISTENSERVER_LINE, text)
+
+        scopes.set_listenserver_zoom(self.game, False)
+        text = self.listenserver.read_text(encoding="utf-8")
+        self.assertNotIn(scopes.LISTENSERVER_LINE, text)
+        self.assertIn("sv_cheats 0", text)  # conteúdo do jogador permanece
+        self.assertFalse(scopes.listenserver_zoom_enabled(self.game))
+
+    def test_add_is_idempotent(self):
+        scopes.set_listenserver_zoom(self.game, True)
+        scopes.set_listenserver_zoom(self.game, True)
+        text = self.listenserver.read_text(encoding="utf-8")
+        self.assertEqual(text.count(scopes.LISTENSERVER_LINE), 1)
+
+    def test_disable_removes_file_created_by_us(self):
+        scopes.set_listenserver_zoom(self.game, True)
+        scopes.set_listenserver_zoom(self.game, False)
+        self.assertFalse(self.listenserver.exists())
+        self.assertFalse(scopes.listenserver_zoom_enabled(self.game))
+
+    def test_revert_zoom_removes_listenserver_block(self):
+        scopes.apply_zoom(self.game, 12.0, ["optic_scope_7x"])
+        scopes.set_listenserver_zoom(self.game, True)
+        self.assertTrue(scopes.revert_zoom(self.game))
+        self.assertFalse(scopes.listenserver_zoom_enabled(self.game))
 
 
 class LaunchOptionTests(unittest.TestCase):
