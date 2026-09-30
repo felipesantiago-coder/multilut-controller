@@ -52,9 +52,39 @@ class MapLineTests(unittest.TestCase):
     def test_loading_map_quoted(self):
         self.assertEqual(core.parse_map_token('Loading map "market"'), "market")
 
+    def test_loading_map_quoted_com_prefixo_de_log(self):
+        # formato real: servidor TF2/CS e cliente GoldSrc (qconsole.log)
+        self.assertEqual(
+            core.parse_map_token('L 03/01/2016 - 23:44:28: Loading map "ctf_2fort"'),
+            "ctf_2fort",
+        )
+
     def test_host_newgame(self):
         self.assertEqual(
             core.parse_map_token("Host_NewGame on map sinjar_coop"), "sinjar_coop"
+        )
+
+    def test_host_newgame_sem_prefixo_log_real_nwi(self):
+        # formato real de servidor Insurgency/Day of Infamy (condebug)
+        self.assertEqual(
+            core.parse_map_token(
+                "---- Host_NewGame ----\nHost_NewGame on map breville"
+            ),
+            "breville",
+        )
+
+    def test_mapchange_to(self):
+        # formato real: L 04/18/2020 - 04:00:03: -------- Mapchange to breville --------
+        self.assertEqual(
+            core.parse_map_token(
+                "L 04/18/2020 - 04:00:03: -------- Mapchange to sinjar --------"
+            ),
+            "sinjar",
+        )
+
+    def test_loading_map_sem_aspas(self):
+        self.assertEqual(
+            core.parse_map_token("] Loading map market_coop"), "market_coop"
         )
 
     def test_host_changelevel(self):

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import time
 import zipfile
 from pathlib import Path
 
@@ -384,6 +385,26 @@ def console_log_status() -> tuple[str, str]:
     return "info", "console.log ausente; adicione -condebug à opção do jogo."
 
 
+def auto_map_pilot_status() -> tuple[str, str]:
+    """Estado do piloto automático por mapa (troca de LUT via console.log)."""
+    if not bool(core.load_config().get("auto_map_switch", False)):
+        return "info", "Desligado; ligue a opção na aba Perfis para trocar o LUT pelo mapa."
+    console = core.find_console_log()
+    if console is None:
+        return "warn", (
+            "console.log não encontrado: o piloto não consegue identificar o mapa "
+            "(confira -condebug e a instalação do jogo; o app precisa estar aberto)."
+        )
+    detail = f"console.log monitorado: {console}"
+    try:
+        age = max(0.0, time.time() - console.stat().st_mtime)
+        if age < 600:
+            detail += f" (atualizado há {int(age)} s)"
+    except OSError:
+        pass
+    return "ok", detail
+
+
 def diagnostic_report() -> list[dict]:
     """Checklist de diagnóstico: cada item é (titulo, estado, detalhe)."""
     items: list[dict] = []
@@ -426,6 +447,11 @@ def diagnostic_report() -> list[dict]:
     state, detail = console_log_status()
     items.append(
         {"title": "console.log do jogo", "state": state, "detail": detail}
+    )
+
+    state, detail = auto_map_pilot_status()
+    items.append(
+        {"title": "Piloto automático por mapa", "state": state, "detail": detail}
     )
 
     state, detail = preview_stack_status()

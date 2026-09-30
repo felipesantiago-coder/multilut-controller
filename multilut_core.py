@@ -596,10 +596,15 @@ def find_console_log() -> Path | None:
 
 # ------------------------------------------------------------ piloto automático por mapa
 # Padrões de linha do console (Source engine) que revelam o mapa carregado.
+# Formatos confirmados em logs reais: 'Loading map "xxx"' (servidor TF2/CS e
+# cliente GoldSrc), 'Host_NewGame on map xxx' e 'Mapchange to xxx' (servidores
+# Insurgency/Day of Infamy da NWI).
 MAP_LINE_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r'Loading map "([^"\s]+)"'),
     re.compile(r"Host_NewGame on map (\S+)"),
+    re.compile(r"Mapchange to ([A-Za-z0-9_\-\[\]\.]+)"),
     re.compile(r"Host_Changelevel\s*\(\s*[^,()]+,\s*([^\s,()]+)"),
+    re.compile(r"Loading map (\S+)"),
     re.compile(r"^\s*map\s+([A-Za-z0-9_\-\[\]\.]+)\s*$"),
 )
 

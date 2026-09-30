@@ -1690,13 +1690,47 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self._console_monitor = monitor
             self._console_path = console
             tail = core.ConsoleTail()
+            fresh = False
             try:
-                tail.offset = console.stat().st_size  # ignora conteúdo antigo
+                stat = console.stat()
+                tail.offset = stat.st_size  # por padrão, ignora conteúdo antigo
+                # log (re)criado agora: o mapa dele ainda não foi processado
+                fresh = stat.st_size > 0 and (time.time() - stat.st_mtime) <= 120.0
             except OSError:
                 tail.offset = 0
             self._console_tail = tail
         except GLib.Error:
             self._console_monitor = None
+            return
+        if fresh:
+            GLib.idle_add(self._apply_fresh_console)
+
+    def _apply_fresh_console(self) -> bool:
+        """Aplica o mapa já gravado em um console.log recém-(re)criado.
+
+        Sem isso, o primeiro mapa de cada boot do jogo (ou o mapa em curso
+        quando o app abre com o jogo rodando) era ignorado: o monitor começa
+        no fim do arquivo e nunca vê as linhas escritas antes de armar.
+        """
+        path = self._console_path
+        if path is None:
+            return GLib.SOURCE_REMOVE
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as stream:
+                stream.seek(max(0, size - 262144))
+                data = stream.read()
+        except OSError:
+            return GLib.SOURCE_REMOVE
+        parser = core.ConsoleTail()
+        latest = None
+        for token in parser.map_tokens(parser.feed(data)):
+            latest = token
+        if latest:
+            profile = core.match_map_profile(latest)
+            if profile is not None:
+                self._on_map_detected(profile, latest)
+        return GLib.SOURCE_REMOVE
 
     def _on_console_changed(self, _monitor, _file, _other, event_type) -> None:
         if event_type in (
@@ -1737,10 +1771,14 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             size = path.stat().st_size
             if size < tail.offset:
                 tail.reset()  # truncado: o jogo recriou o arquivo
+            lines: list[str] = []
             with path.open("rb") as stream:
                 stream.seek(tail.offset)
-                data = stream.read(262144)
-            lines = tail.feed(data)
+                for _ in range(128):  # 128 x 256 KB = 32 MB por dreno, no máximo
+                    data = stream.read(262144)
+                    if not data:
+                        break
+                    lines.extend(tail.feed(data))
         except OSError:
             return GLib.SOURCE_REMOVE
         latest = None
