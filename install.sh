@@ -61,7 +61,7 @@ if python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("
     printf '%s\n' "Simulação de LUT pronta (numpy + Pillow encontrados)."
   else
     printf '%s\n' "Dica: para a pré-visualização de LUT, instale numpy e Pillow:"
-    printf '%s\n' "  sudo eopkg it python3-numpy python3-pillow"
+    printf '%s\n' "  sudo eopkg it numpy python-pillow"
   fi
 else
   printf '%s\n' "O aplicativo foi instalado, mas faltam dependências gráficas."

@@ -1159,7 +1159,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         if not atlas.DEPENDENCIES_AVAILABLE:
             self.toast(
                 "Substituição por .cube requer numpy e Pillow "
-                "(no Solus: sudo eopkg it python3-numpy python3-pillow)."
+                "(no Solus: sudo eopkg it numpy python-pillow)."
             )
             return
         dialog = Gtk.FileDialog()
@@ -1415,7 +1415,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.preview_picture.set_visible(False)
             self.preview_status.set_label(
                 "Simulação indisponível: instale numpy e Pillow "
-                "(no Solus: sudo eopkg it python3-numpy python3-pillow) "
+                "(no Solus: sudo eopkg it numpy python-pillow) "
                 "e reabra o aplicativo."
             )
             return

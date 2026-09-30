@@ -458,7 +458,7 @@ def load_atlas_array(atlas_path: Path | str) -> "np.ndarray":
     if not DEPENDENCIES_AVAILABLE:
         raise PreviewError(
             "Simulação indisponível: instale numpy e Pillow "
-            "(no Solus: sudo eopkg it python3-numpy python3-pillow)."
+            "(no Solus: sudo eopkg it numpy python-pillow)."
         )
     path = Path(atlas_path)
     try:
@@ -483,7 +483,7 @@ def load_source_image(source_path: Path | str, max_width: int = 1024) -> "Image.
     if not DEPENDENCIES_AVAILABLE:
         raise PreviewError(
             "Simulação indisponível: instale numpy e Pillow "
-            "(no Solus: sudo eopkg it python3-numpy python3-pillow)."
+            "(no Solus: sudo eopkg it numpy python-pillow)."
         )
     try:
         image = Image.open(source_path).convert("RGB")

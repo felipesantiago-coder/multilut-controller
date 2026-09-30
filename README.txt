@@ -190,7 +190,7 @@ A pagina "Sistema" concentra o diagnostico e a manutencao:
 SIMULACAO DE LUT (OPCIONAL)
 ---------------------------
 
-Com python3-numpy e python3-pillow instalados, o painel de detalhes ganha o
+Com numpy e python-pillow instalados, o painel de detalhes ganha o
 card "Pre-visualizacao (simulacao)": lado a lado, a foto do mapa original e a
 foto processada pela simulacao em CPU do pipeline completo do shader
 (recuperacao de sombras, brilho protegido, LUT trilinear do atlas v1.8,

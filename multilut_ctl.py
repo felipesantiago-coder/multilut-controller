@@ -237,7 +237,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
     if not preview.DEPENDENCIES_AVAILABLE:
         print(
             "Erro: a simulação requer numpy e Pillow "
-            "(no Solus: sudo eopkg it python3-numpy python3-pillow).",
+            "(no Solus: sudo eopkg it numpy python-pillow).",
             file=sys.stderr,
         )
         return 1
@@ -302,7 +302,7 @@ def cmd_atlas(args: argparse.Namespace) -> int:
     if not atlas_mod.DEPENDENCIES_AVAILABLE:
         print(
             "Erro: o override com .cube requer numpy e Pillow "
-            "(no Solus: sudo eopkg it python3-numpy python3-pillow).",
+            "(no Solus: sudo eopkg it numpy python-pillow).",
             file=sys.stderr,
         )
         return 1

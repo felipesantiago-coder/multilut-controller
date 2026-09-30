@@ -75,7 +75,7 @@ def parse_cube_text(text: str, source: str = "") -> dict:
     if np is None:
         raise AtlasError(
             "Override com .cube requer numpy e Pillow "
-            "(no Solus: sudo eopkg it python3-numpy python3-pillow)."
+            "(no Solus: sudo eopkg it numpy python-pillow)."
         )
     label = f" ({source})" if source else ""
     size: int | None = None
@@ -202,7 +202,7 @@ def resample_lut(table: "np.ndarray", target_size: int = ATLAS_TILE) -> "np.ndar
     if np is None:
         raise AtlasError(
             "Reamostragem requer numpy e Pillow "
-            "(no Solus: sudo eopkg it python3-numpy python3-pillow)."
+            "(no Solus: sudo eopkg it numpy python-pillow)."
         )
     source_size = table.shape[0]
     if table.ndim != 4 or table.shape[1] != source_size or table.shape[2] != source_size:

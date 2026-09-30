@@ -359,12 +359,20 @@ def glob_any(pattern: str) -> bool:
 
 def preview_stack_status() -> tuple[str, str]:
     """Pillow/numpy opcionais usados pela simulação de LUT (item de preview)."""
+    missing: list[str] = []
     try:
         import numpy  # noqa: F401
+    except ImportError:
+        missing.append("numpy")
+    try:
         import PIL  # noqa: F401
     except ImportError:
+        missing.append("Pillow")
+    if missing:
         return "info", (
-            "Simulação de LUT indisponível; instale python3-numpy e python3-pillow."
+            "Simulação de LUT indisponível (ausente: "
+            + ", ".join(missing)
+            + "); no Solus: sudo eopkg it numpy python-pillow."
         )
     return "ok", "Pillow e numpy disponíveis para simulação de LUT."
 
