@@ -26,6 +26,7 @@ except (ImportError, ValueError) as exc:
     )
     raise SystemExit(2) from exc
 
+import multilut_atlas as atlas
 import multilut_core as core
 import multilut_extra as extra
 import multilut_preview as preview
@@ -348,6 +349,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         page_profiles = self.view_stack.add_titled(paned, "profiles", "Perfis")
         page_profiles.set_icon_name("view-grid-symbolic")
+        page_atlas = self.view_stack.add_titled(
+            self.build_atlas_page(), "atlas", "Atlas"
+        )
+        page_atlas.set_icon_name("image-x-generic-symbolic")
         page_history = self.view_stack.add_titled(
             self.build_history_page(), "history", "Histórico"
         )
@@ -843,7 +848,12 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         """Mostra a faixa da LUT usada pelo perfil no atlas v1.8."""
         if not hasattr(self, "atlas_picture"):
             return
-        row = core.lut_row_for_profile(profile.id)
+        mapping = self.current_lut_row_map()
+        row = (
+            mapping.get(profile.id, core.lut_row_for_profile(profile.id))
+            if mapping
+            else core.lut_row_for_profile(profile.id)
+        )
         self.atlas_row_label.set_label(
             f"Perfil {profile.id:02d} · linha {row} do atlas "
             f"({core.ATLAS_SLICES} fatias x {core.ATLAS_ROWS} linhas)"
@@ -869,7 +879,410 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.atlas_picture.set_visible(True)
         self.atlas_status.set_label(message)
 
+    # ------------------------------------------------------- aba Atlas (Lote 2)
+    def build_atlas_page(self) -> Gtk.Widget:
+        """Página do atlas v1.8: override de linhas com .cube e reindexação."""
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        page.set_margin_start(26)
+        page.set_margin_end(26)
+        page.set_margin_top(20)
+        page.set_margin_bottom(20)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        title = Gtk.Label(label="Atlas v1.8", xalign=0)
+        title.add_css_class("hero-title")
+        title.set_hexpand(True)
+        restore_bundle_button = Gtk.Button(label="Restaurar atlas do pacote")
+        restore_bundle_button.set_tooltip_text(
+            "Copia o atlas original do pacote v1.8 por cima do instalado "
+            "(o atlas atual fica de backup)"
+        )
+        restore_bundle_button.connect("clicked", self.on_atlas_restore_bundle)
+        header.append(title)
+        header.append(restore_bundle_button)
+        page.append(header)
+
+        self.atlas_page_status = Gtk.Label(xalign=0, wrap=True)
+        self.atlas_page_status.add_css_class("muted")
+        page.append(self.atlas_page_status)
+
+        self.atlas_rows_list = Gtk.ListBox()
+        self.atlas_rows_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.atlas_rows_list.add_css_class("card")
+        self.atlas_rows_list.connect("row-selected", self.on_atlas_row_selected)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_child(self.atlas_rows_list)
+        scroller.set_vexpand(True)
+        page.append(scroller)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.atlas_override_button = Gtk.Button(label="Substituir por .cube…")
+        self.atlas_override_button.add_css_class("suggested-action")
+        self.atlas_override_button.set_tooltip_text(
+            "Interpreta a LUT 3D do .cube, reamostra para 32³ e grava na linha "
+            "selecionada do atlas instalado (com backup)"
+        )
+        self.atlas_override_button.connect("clicked", self.on_atlas_override_clicked)
+        self.atlas_restore_row_button = Gtk.Button(
+            label="Restaurar linha do pacote"
+        )
+        self.atlas_restore_row_button.set_tooltip_text(
+            "Devolve a linha selecionada à LUT original do pacote v1.8"
+        )
+        self.atlas_restore_row_button.connect(
+            "clicked", self.on_atlas_restore_row_clicked
+        )
+        self.atlas_restore_backup_button = Gtk.Button(label="Restaurar backup (.bak)")
+        self.atlas_restore_backup_button.set_tooltip_text(
+            "Copia o backup mais recente do atlas de volta ao lugar"
+        )
+        self.atlas_restore_backup_button.connect(
+            "clicked", self.on_atlas_restore_backup_clicked
+        )
+        for button in (
+            self.atlas_override_button,
+            self.atlas_restore_row_button,
+            self.atlas_restore_backup_button,
+        ):
+            actions.append(button)
+        page.append(actions)
+
+        reindex_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        reindex_card.add_css_class("card")
+        reindex_title = Gtk.Label(
+            label="Reindexação — perfil → linha do atlas (P_LUT_ROW)", xalign=0
+        )
+        reindex_title.add_css_class("section-title")
+        reindex_help = Gtk.Label(
+            xalign=0,
+            wrap=True,
+            label=(
+                "Aponta um perfil para outra LUT-base do atlas reescrevendo o "
+                "bloco P_LUT_ROW do shader instalado (com backup). Perfis 0–16 "
+                "usam a linha com o próprio número por padrão; 17–24 reaproveitam "
+                "linhas de perfis de mapa."
+            ),
+        )
+        reindex_help.add_css_class("muted")
+        reindex_controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.reindex_profile_dropdown = Gtk.DropDown(
+            model=Gtk.StringList.new(
+                [
+                    f"{profile.id:02d} — {profile.name}"
+                    for profile in sorted(core.PROFILES, key=lambda item: item.id)
+                ]
+            )
+        )
+        self.reindex_profile_dropdown.set_size_request(300, -1)
+        self.reindex_profile_dropdown.connect(
+            "notify::selected", self.on_reindex_selection_changed
+        )
+        arrow_label = Gtk.Label(label="→", xalign=0.5)
+        self.reindex_row_dropdown = Gtk.DropDown(
+            model=Gtk.StringList.new(
+                [
+                    f"Linha {row} — {core.PROFILE_BY_ID[row].name}"
+                    for row in range(core.ATLAS_ROWS)
+                ]
+            )
+        )
+        self.reindex_row_dropdown.set_size_request(300, -1)
+        self.reindex_row_dropdown.connect(
+            "notify::selected", self.on_reindex_selection_changed
+        )
+        self.reindex_apply_button = Gtk.Button(label="Aplicar")
+        self.reindex_apply_button.connect("clicked", self.on_reindex_apply)
+        self.reindex_reset_button = Gtk.Button(label="Restaurar padrão")
+        self.reindex_reset_button.connect("clicked", self.on_reindex_reset)
+        reindex_controls.append(self.reindex_profile_dropdown)
+        reindex_controls.append(arrow_label)
+        reindex_controls.append(self.reindex_row_dropdown)
+        reindex_controls.append(self.reindex_apply_button)
+        reindex_controls.append(self.reindex_reset_button)
+        self.reindex_current_label = Gtk.Label(xalign=0, wrap=True)
+        self.reindex_current_label.add_css_class("muted")
+        reindex_card.append(reindex_title)
+        reindex_card.append(reindex_help)
+        reindex_card.append(reindex_controls)
+        reindex_card.append(self.reindex_current_label)
+        page.append(reindex_card)
+
+        self._atlas_selected_row = 0
+        self.refresh_atlas_page()
+        return page
+
+    def _installed_atlas_path(self) -> Path | None:
+        """Atlas instalado no vkBasalt (None quando só existe o pacote interno)."""
+        installed = core.default_texture_path()
+        return installed if installed.is_file() else None
+
+    def _atlas_row_title(self, row: int) -> str:
+        return f"Linha {row} — {core.PROFILE_BY_ID[row].name}"
+
+    def refresh_atlas_page(self) -> None:
+        """Reconstrói a lista de 17 linhas com miniaturas e donos atuais."""
+        if not hasattr(self, "atlas_rows_list"):
+            return
+        installed = self._installed_atlas_path()
+        pixbuf = self.load_atlas_pixbuf()
+        mapping = self.current_lut_row_map()
+        if mapping is None:
+            mapping = {
+                profile_id: core.lut_row_for_profile(profile_id)
+                for profile_id in range(len(core.PROFILES))
+            }
+        owners = atlas.row_owner_profiles(mapping)
+
+        selected = getattr(self, "_atlas_selected_row", 0)
+        while True:
+            existing = self.atlas_rows_list.get_row_at_index(0)
+            if existing is None:
+                break
+            self.atlas_rows_list.remove(existing)
+
+        width = pixbuf.get_width() if pixbuf else 0
+        height = pixbuf.get_height() if pixbuf else 0
+        row_height = max(1, height // core.ATLAS_ROWS) if pixbuf else 0
+        for row in range(core.ATLAS_ROWS):
+            item = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+            item.set_margin_start(12)
+            item.set_margin_end(12)
+            item.set_margin_top(8)
+            item.set_margin_bottom(8)
+            picture = Gtk.Picture()
+            picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+            picture.set_can_shrink(True)
+            picture.set_size_request(300, 44)
+            if pixbuf is not None:
+                top = min(row * row_height, max(0, height - row_height))
+                strip = pixbuf.new_subpixbuf(0, top, width, row_height)
+                picture.set_paintable(Gdk.Texture.new_for_pixbuf(strip))
+            item.append(picture)
+            labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            labels.set_hexpand(True)
+            name = Gtk.Label(
+                label=self._atlas_row_title(row), xalign=0
+            )
+            name.add_css_class("section-title")
+            used = ", ".join(f"{owner:02d}" for owner in owners[row]) or "—"
+            detail = Gtk.Label(
+                label=f"Usada pelos perfis: {used}", xalign=0
+            )
+            detail.add_css_class("muted")
+            labels.append(name)
+            labels.append(detail)
+            item.append(labels)
+            list_row = Gtk.ListBoxRow()
+            list_row.set_name(str(row))
+            list_row.set_child(item)
+            self.atlas_rows_list.append(list_row)
+
+        self.atlas_rows_list.select_row(self.atlas_rows_list.get_row_at_index(selected))
+        for button in (self.atlas_override_button, self.atlas_restore_row_button):
+            button.set_sensitive(installed is not None)
+        self.atlas_restore_backup_button.set_sensitive(
+            installed is not None and core.backup_path(installed).is_file()
+        )
+        if installed is not None:
+            valid, message = core.validate_texture(installed)
+            self.atlas_page_status.set_label(
+                f"{installed} — {message} Selecione uma linha para substituir "
+                "por um .cube ou restaurar a original do pacote."
+            )
+        else:
+            self.atlas_page_status.set_label(
+                "Atlas do pacote v1.8 em exibição (somente leitura). Clique em "
+                "“Instalar/atualizar pacote MultiLUT v1.8” na aba Perfis para "
+                "habilitar substituição e backup."
+            )
+        self.refresh_reindex_current()
+
+    def on_atlas_row_selected(self, _listbox, row) -> None:
+        if row is not None:
+            self._atlas_selected_row = int(row.get_name())
+
+    def _selected_atlas_row(self) -> int:
+        selected = self.atlas_rows_list.get_selected_row()
+        if selected is None:
+            return 0
+        return int(selected.get_name())
+
+    def _after_atlas_change(self, message: str) -> None:
+        """Invalida caches e atualiza todas as superfícies que mostram o atlas."""
+        self._atlas_pixbuf = None
+        self._atlas_pixbuf_source = None
+        self.refresh_atlas_page()
+        self.update_atlas_card(self.selected_profile)
+        self.update_preview_card(self.selected_profile)
+        self.refresh_shader_status()
+        self.toast(message)
+
+    def on_atlas_override_clicked(self, _button) -> None:
+        installed = self._installed_atlas_path()
+        if installed is None:
+            self.toast(
+                "Instale o pacote MultiLUT v1.8 antes de substituir linhas."
+            )
+            return
+        if not atlas.DEPENDENCIES_AVAILABLE:
+            self.toast(
+                "Substituição por .cube requer numpy e Pillow "
+                "(no Solus: sudo eopkg it python3-numpy python3-pillow)."
+            )
+            return
+        dialog = Gtk.FileDialog()
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        cube_filter = Gtk.FileFilter()
+        cube_filter.set_name("LUT 3D (.cube)")
+        cube_filter.add_pattern("*.cube")
+        filters.append(cube_filter)
+        all_filter = Gtk.FileFilter()
+        all_filter.set_name("Todos os arquivos")
+        all_filter.add_pattern("*")
+        filters.append(all_filter)
+        dialog.set_filters(filters)
+        dialog.open(self, None, self._atlas_cube_dialog_done)
+
+    def _atlas_cube_dialog_done(self, dialog, result) -> None:
+        try:
+            file = dialog.open_finish(result)
+        except GLib.Error:
+            return  # diálogo cancelado
+        path = file.get_path() if file is not None else None
+        if not path:
+            return
+        installed = self._installed_atlas_path()
+        if installed is None:
+            return
+        try:
+            info = atlas.override_row_with_cube(
+                installed, self._selected_atlas_row(), path
+            )
+        except core.MultiLUTError as exc:
+            self.toast(f"Falha ao substituir a linha: {exc}")
+            return
+        self._after_atlas_change(
+            f"Linha {info['row']} substituída pela LUT “{Path(path).name}” "
+            f"({info['cube_size']}³ reamostrada para 32³; backup gravado)."
+        )
+
+    def on_atlas_restore_row_clicked(self, _button) -> None:
+        installed = self._installed_atlas_path()
+        if installed is None:
+            self.toast("Instale o pacote MultiLUT v1.8 antes de restaurar linhas.")
+            return
+        row = self._selected_atlas_row()
+        try:
+            atlas.restore_row_from_bundle(installed, row, BUNDLE_DIR)
+        except core.MultiLUTError as exc:
+            self.toast(f"Falha ao restaurar a linha: {exc}")
+            return
+        self._after_atlas_change(
+            f"{self._atlas_row_title(row)} restaurada ao original do pacote."
+        )
+
+    def on_atlas_restore_backup_clicked(self, _button) -> None:
+        installed = self._installed_atlas_path()
+        if installed is None:
+            self.toast("Nenhum atlas instalado para restaurar.")
+            return
+        try:
+            backup = atlas.restore_atlas_backup(installed)
+        except core.MultiLUTError as exc:
+            self.toast(f"Falha ao restaurar o backup: {exc}")
+            return
+        self._after_atlas_change(f"Atlas restaurado do backup ({backup}).")
+
+    def on_atlas_restore_bundle(self, _button) -> None:
+        installed = self._installed_atlas_path()
+        if installed is None:
+            self.toast("Instale o pacote MultiLUT v1.8 antes de restaurar o atlas.")
+            return
+        try:
+            bundle_image = atlas.load_atlas_image(
+                BUNDLE_DIR / "Textures/MultiLut_Insurgency_Optimized.png"
+            )
+            atlas.save_atlas_atomic(bundle_image, installed)
+        except core.MultiLUTError as exc:
+            self.toast(f"Falha ao restaurar o atlas: {exc}")
+            return
+        self._after_atlas_change(
+            "Atlas original do pacote v1.8 restaurado (o anterior ficou em .bak)."
+        )
+
+    def on_reindex_selection_changed(self, _dropdown, _param) -> None:
+        self.refresh_reindex_current()
+
+    def refresh_reindex_current(self) -> None:
+        if not hasattr(self, "reindex_current_label"):
+            return
+        profile_id = self.reindex_profile_dropdown.get_selected()
+        mapping = self.current_lut_row_map()
+        if mapping is not None:
+            row = mapping.get(profile_id, core.lut_row_for_profile(profile_id))
+            self.reindex_current_label.set_label(
+                f"Situação atual: perfil {profile_id:02d} usa a linha {row} "
+                "do atlas."
+            )
+        else:
+            self.reindex_current_label.set_label(
+                "Mapeamento atual indisponível (shader não encontrado ou fora "
+                "do padrão v1.8)."
+            )
+
+    def on_reindex_apply(self, _button) -> None:
+        shader_path = Path(self.shader_path).expanduser()
+        if not shader_path.is_file():
+            self.toast(
+                "Shader não encontrado; instale o pacote MultiLUT v1.8 antes "
+                "de reindexar."
+            )
+            return
+        profile_id = self.reindex_profile_dropdown.get_selected()
+        row = self.reindex_row_dropdown.get_selected()
+        try:
+            info = atlas.reindex_profile(shader_path, profile_id, row)
+        except core.MultiLUTError as exc:
+            self.toast(f"Falha na reindexação: {exc}")
+            return
+        if not info["changed"]:
+            self.toast(f"Perfil {profile_id:02d} já usa a linha {row}.")
+            return
+        self._after_atlas_change(
+            f"Perfil {profile_id:02d} reindexado: linha "
+            f"{info['previous_row']} → {row} (backup gravado)."
+        )
+
+    def on_reindex_reset(self, _button) -> None:
+        shader_path = Path(self.shader_path).expanduser()
+        if not shader_path.is_file():
+            self.toast("Shader não encontrado; nada a restaurar.")
+            return
+        try:
+            info = atlas.reset_lut_row_map(shader_path)
+        except core.MultiLUTError as exc:
+            self.toast(f"Falha ao restaurar o mapeamento: {exc}")
+            return
+        if not info["changed"]:
+            self.toast("O mapeamento já está no padrão do shader v1.8.")
+            return
+        self._after_atlas_change(
+            "Mapeamento perfil → linha restaurado ao padrão do shader v1.8."
+        )
+
     # --------------------------------------------- pré-visualização (simulação)
+    def current_lut_row_map(self) -> dict[int, int] | None:
+        """Mapeamento perfil -> linha do shader instalado (None se ilegível)."""
+        try:
+            text = Path(self.shader_path).expanduser().read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return None
+        try:
+            return atlas.parse_lut_row_map(text)
+        except core.MultiLUTError:
+            return None
+
     def _game_resolution_from_config(self) -> tuple[int, int]:
         """Resolução de render do jogo no config.json (padrão 1366x768)."""
         try:
@@ -993,6 +1406,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         shader_path = self.shader_path
         if not Path(shader_path).expanduser().is_file():
             shader_path = BUNDLE_DIR / "Shaders/MultiLUT_Insurgency_Optimized.fx"
+        mapping = self.current_lut_row_map()
+        lut_row = (
+            mapping.get(profile.id) if mapping else core.lut_row_for_profile(profile.id)
+        )
         self.preview_picture.set_visible(True)
         self.preview_status.set_label("Simulando o pipeline do shader…")
         worker = threading.Thread(
@@ -1006,6 +1423,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                 shader_path,
                 slug,
                 self.game_resolution,
+                lut_row,
             ),
             daemon=True,
         )
@@ -1021,6 +1439,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         shader_path: Path,
         slug: str,
         game_resolution: tuple[int, int],
+        lut_row: int | None,
     ) -> None:
         """Thread da simulação; o resultado volta pela fila principal do GLib."""
         try:
@@ -1031,6 +1450,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                 shader_path,
                 max_width=768,
                 game_resolution=game_resolution,
+                lut_row=lut_row,
             )
             composed = preview.compose_side_by_side(
                 result["original"], result["simulated"]

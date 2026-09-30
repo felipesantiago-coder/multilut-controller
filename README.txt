@@ -206,6 +206,37 @@ instalado; o perfil 0 e bypass real, igual no jogo.
 
   O PNG de saida traz "original | simulado" lado a lado.
 
+ATLAS: SUBSTITUICAO DE LINHAS (.CUBE) E REINDEXACAO (LOTE 2)
+------------------------------------------------------------
+
+O atlas v1.8 tem 17 LUTs (linhas de 1024x32 com 32 fatias azuis). A aba
+"Atlas" mostra cada linha com a miniatura da faixa, o nome da LUT-base e os
+perfis que a usam (extraidos do bloco P_LUT_ROW do shader instalado).
+
+- Substituir linha por .cube: selecione a linha e clique "Substituir por
+  .cube...". O arquivo e interpretado (LUT_3D_SIZE 2 a 256, vermelho variando
+  primeiro, LUT_3D_INPUT_RANGE respeitada), reamostrado para 32^3 por
+  interpolacao trilinear e gravado no layout do shader. A gravacao e atomica
+  e o atlas anterior fica em .bak. Requer numpy e Pillow.
+- Restaurar: "Restaurar linha do pacote" devolve a LUT original da linha
+  selecionada; "Restaurar atlas do pacote" copia o atlas completo do pacote
+  interno; "Restaurar backup (.bak)" traz de volta o atlas anterior.
+- Reindexacao: o cartao inferior reescreve o bloco P_LUT_ROW do shader para
+  apontar qualquer perfil (0-24) a qualquer linha (0-16), com backup e
+  verificacao apos a gravacao. "Restaurar padrao" devolve o mapeamento
+  original do shader v1.8. A pre-visualizacao, o card "Atlas do perfil" e a
+  lista da aba acompanham o mapeamento atual automaticamente.
+- Os dois atlas sao independentes: o pacote interno (bundle) nunca e
+  alterado, entao "Instalar/atualizar pacote" devolve tudo ao original.
+
+Na CLI:
+
+    multilut-ctl rows                          # linhas do atlas e perfis donos
+    multilut-ctl atlas 3 minha.cube            # substitui a linha 3 (backup em .bak)
+    multilut-ctl atlas 3 minha.cube --atlas caminho/atlas.png
+    multilut-ctl reindex 14 1                  # perfil 14 passa a usar a linha 1
+    multilut-ctl reindex --reset               # mapeamento padrao do v1.8
+
 LIMPEZA DA FUNCIONALIDADE DE LUNETAS (VERSOES ANTERIORES)
 --------------------------------------------------------
 

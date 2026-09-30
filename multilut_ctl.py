@@ -7,6 +7,9 @@ Uso:
   multilut-ctl active                  Mostra o perfil ativo
   multilut-ctl status                  Estado do shader, do perfil e do jogo
   multilut-ctl preview <id|nome|slug>  Simula o perfil sobre a foto de um mapa
+  multilut-ctl rows                    Lista as linhas do atlas e quem as usa
+  multilut-ctl atlas <linha> <arquivo> Substitui a linha do atlas por um .cube
+  multilut-ctl reindex <perfil> <linha>  Aponta o perfil para outra linha
 
 Opções comuns:
   --shader CAMINHO    Shader .fx alternativo (padrão: config ou candidato)
@@ -212,6 +215,71 @@ def cmd_preview(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rows(args: argparse.Namespace) -> int:
+    import multilut_atlas as atlas_mod
+
+    shader = resolve_shader(args.shader)
+    mapping = atlas_mod.parse_lut_row_map(shader.read_text(encoding="utf-8"))
+    owners = atlas_mod.row_owner_profiles(mapping)
+    print(f"Atlas v1.8: {core.ATLAS_SLICES} fatias x {core.ATLAS_ROWS} linhas ({shader})")
+    for row in range(core.ATLAS_ROWS):
+        used = ", ".join(f"{owner:02d}" for owner in owners[row]) or "-"
+        print(
+            f"linha {row:2d}  {core.PROFILE_BY_ID[row].name:34s} perfis: {used}"
+        )
+    return 0
+
+
+def cmd_atlas(args: argparse.Namespace) -> int:
+    import multilut_atlas as atlas_mod
+
+    if not atlas_mod.DEPENDENCIES_AVAILABLE:
+        print(
+            "Erro: o override com .cube requer numpy e Pillow "
+            "(no Solus: sudo eopkg it python3-numpy python3-pillow).",
+            file=sys.stderr,
+        )
+        return 1
+    target = (
+        Path(args.atlas).expanduser() if args.atlas else core.default_texture_path()
+    )
+    info = atlas_mod.override_row_with_cube(target, args.linha, args.cube)
+    print(
+        f"Linha {info['row']} do atlas {target} substituída por "
+        f"{args.cube} ({info['cube_size']}³ reamostrada para 32³)"
+    )
+    if info["backup"]:
+        print(f"  backup: {info['backup']}")
+    return 0
+
+
+def cmd_reindex(args: argparse.Namespace) -> int:
+    import multilut_atlas as atlas_mod
+
+    shader = resolve_shader(args.shader)
+    if args.reset:
+        info = atlas_mod.reset_lut_row_map(shader)
+        if not info["changed"]:
+            print("O mapeamento já está no padrão do shader v1.8.")
+        else:
+            print(f"Mapeamento perfil -> linha restaurado ao padrão ({shader}).")
+        return 0
+    if args.perfil is None or args.linha is None:
+        raise core.MultiLUTError(
+            "Informe o perfil e a linha de destino (0 a 16), ou use --reset."
+        )
+    profile = match_profile(args.perfil)
+    info = atlas_mod.reindex_profile(shader, profile.id, args.linha)
+    if not info["changed"]:
+        print(f"Perfil {profile.id:02d} — {profile.name} já usa a linha {args.linha}.")
+    else:
+        print(
+            f"Perfil {profile.id:02d} — {profile.name}: linha "
+            f"{info['previous_row']} -> {args.linha} ({shader})"
+        )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--shader", help="caminho do shader .fx alternativo")
@@ -264,6 +332,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--saida", "-o", default="multilut_preview.png", help="PNG de saída"
     )
     preview_parser.set_defaults(func=cmd_preview)
+
+    rows_parser = subparsers.add_parser(
+        "rows", parents=[common], help="lista as linhas do atlas e quem as usa"
+    )
+    rows_parser.set_defaults(func=cmd_rows)
+
+    atlas_parser = subparsers.add_parser(
+        "atlas",
+        parents=[common],
+        help="substitui a linha do atlas por uma LUT .cube",
+    )
+    atlas_parser.add_argument("linha", type=int, help="linha do atlas (0 a 16)")
+    atlas_parser.add_argument("cube", help="arquivo .cube com a LUT 3D")
+    atlas_parser.add_argument(
+        "--atlas", help="PNG do atlas alvo (padrão: instalado ou pacote)"
+    )
+    atlas_parser.set_defaults(func=cmd_atlas)
+
+    reindex_parser = subparsers.add_parser(
+        "reindex",
+        parents=[common],
+        help="aponta um perfil para outra linha do atlas (P_LUT_ROW)",
+    )
+    reindex_parser.add_argument(
+        "perfil", nargs="?", default=None, help="id, nome ou slug do perfil"
+    )
+    reindex_parser.add_argument(
+        "linha", nargs="?", type=int, default=None, help="linha de destino (0 a 16)"
+    )
+    reindex_parser.add_argument(
+        "--reset", action="store_true", help="restaura o mapeamento padrão v1.8"
+    )
+    reindex_parser.set_defaults(func=cmd_reindex)
     return parser
 
 
