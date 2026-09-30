@@ -144,6 +144,33 @@ isso, a ativação precisa acontecer DEPOIS dos playlists):
    continua mostrando "Loading theater file 'classic'" e nenhuma
    "multilut_zoom". Esse é o sintoma de "apliquei e não mudou nada".
 
+USO EM SERVIDORES DE TERCEIROS (SOMENTE COM AUTORIZAÇÃO DO ADMIN):
+
+O theater é autoritativo no servidor: ao conectar, o cliente recebe o
+theater do servidor (o console mostra "Loading theater file ..." com o
+nome escolhido pelo servidor) e nenhum ajuste no cliente vale lá. Para a
+ampliação funcionar num servidor de terceiros, ela precisa ser instalada
+NO SERVIDOR — assim vale igualmente para todos os jogadores:
+
+1. No aplicativo, aba Lunetas, botão "Gerar para servidor…": grava o
+   arquivo multilut_zoom.theater (com a ampliação e as lunetas
+   selecionadas no momento) em qualquer pasta, para você enviar ao admin.
+2. Servidor SEM theater custom: copie o arquivo para
+   <servidor>/insurgency/scripts/theaters/ e force o theater no playlist
+   do servidor (forced_cvars: mp_theater_override multilut_zoom) — em
+   coop é o único ponto que vence, igual no jogo local; server.cfg é
+   sobrescrito pelo playlist.
+3. Servidor COM theater custom (ex.: um mod de gameplay): mescle o bloco
+   "weapon_upgrades" do multilut_zoom.theater dentro do theater do
+   servidor. O merge de theaters é profundo: os FOVs por arma vencem os
+   valores de nível superior e todo o resto do mod permanece intacto.
+4. Servidor com fastdl: distribua o theater no pacote de download, como
+   qualquer outro arquivo custom do servidor.
+
+Sem autorização do admin não use: editar a cópia local do theater do
+servidor configura vantagem indevida sobre os demais jogadores e risco
+de banimento (consistência, BattlEye, regras do servidor).
+
 OPÇÕES DE AMPLIAÇÃO:
 
 - Opções rápidas na aba: 3x, 5x, 10x e 12x — um clique ajusta e grava.

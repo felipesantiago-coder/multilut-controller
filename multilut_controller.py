@@ -596,6 +596,14 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.scopes_revert_button.connect("clicked", self.on_scopes_revert)
         actions.append(self.scopes_apply_button)
         actions.append(self.scopes_revert_button)
+        self.scopes_export_button = Gtk.Button(label="Gerar para servidor…")
+        self.scopes_export_button.set_tooltip_text(
+            "Gera o arquivo multilut_zoom.theater para enviar ao administrador "
+            "de um servidor que autorizou a instalação — o theater é instalado "
+            "NO SERVIDOR e passa a valer para todos os jogadores"
+        )
+        self.scopes_export_button.connect("clicked", self.on_scopes_export)
+        actions.append(self.scopes_export_button)
         content.append(actions)
 
         self.scopes_status = Gtk.Label(xalign=0, wrap=True)
@@ -612,7 +620,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                 "playlists a cada partida local (solo incluso). Comando manual "
                 "no console precisa de um mapa recarregado depois "
                 "(changelevel) — no meio da partida ele apenas reinicia a "
-                "rodada."
+                "rodada. Em servidores de terceiros o theater é escolhido "
+                "pelo servidor: use Gerar para servidor e envie o arquivo ao "
+                "admin (com autorização) para instalar lá — assim vale para "
+                "todos, sem alterar o seu cliente."
             ),
             xalign=0,
             wrap=True,
@@ -792,6 +803,70 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.refresh_scopes_page()
         self.toast(
             "Padrão do jogo restaurado." if changed else "Nada para restaurar."
+        )
+
+    def on_scopes_export(self, _button) -> None:
+        """Gera o theater das lunetas em um local escolhido (p/ servidores)."""
+        optics = self._selected_optics()
+        if not optics:
+            self.toast("Selecione pelo menos uma luneta.", 5)
+            return
+        target = self.target_scale.get_value()
+        self._pending_export = (target, optics)
+        default_name = f"{scopes.THEATER_NAME}.theater"
+        if hasattr(Gtk, "FileDialog"):  # GTK 4.10+
+            dialog = Gtk.FileDialog()
+            dialog.set_title("Salvar theater para servidor")
+            dialog.set_initial_name(default_name)
+            try:
+                dialog.save(self, None, self._on_export_dialog_done)
+            except GLib.Error as exc:
+                self.toast(f"Não foi possível abrir o diálogo: {exc}", 6)
+            return
+        dialog = Gtk.FileChooserNative.new(  # GTK < 4.10
+            "Salvar theater para servidor",
+            self,
+            Gtk.FileChooserAction.SAVE,
+            "Salvar",
+            "Cancelar",
+        )
+        dialog.set_current_name(default_name)
+        dialog.connect("response", self._on_export_native_done)
+        dialog.show()
+
+    def _on_export_dialog_done(self, dialog, result) -> None:
+        try:
+            file = dialog.save_finish(result)
+        except GLib.Error as exc:
+            if exc.code != Gtk.DialogError.DISMISSED:
+                self.toast(f"Não foi possível escolher o local: {exc}", 6)
+            return
+        if file is not None:
+            self._write_export(file.get_path())
+
+    def _on_export_native_done(self, dialog, response) -> None:
+        if response != Gtk.ResponseType.ACCEPT:
+            return
+        file = dialog.get_file()
+        if file is not None:
+            self._write_export(file.get_path())
+
+    def _write_export(self, path: str | None) -> None:
+        if not path:
+            return
+        pending = getattr(self, "_pending_export", None)
+        if pending is None:
+            return
+        target, optics = pending
+        try:
+            saved = scopes.export_theater_file(path, target, optics)
+        except (OSError, core.MultiLUTError) as exc:
+            self.toast(f"Não foi possível gerar o arquivo: {exc}", 8)
+            return
+        self.toast(
+            f"Theater {target:g}x gerado: {saved}. Envie-o ao admin do "
+            "servidor para instalar — lá vale para todos os jogadores.",
+            10,
         )
 
     def toast(self, message: str, timeout: int = 4) -> None:

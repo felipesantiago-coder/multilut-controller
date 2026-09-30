@@ -507,3 +507,52 @@ class FindGameDirAboveTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExportTheaterTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name)
+
+    def test_writes_content_equal_to_build_theater(self):
+        dest = self.base / "saida" / "multilut_zoom.theater"
+        saved = scopes.export_theater_file(dest, 12.0, scopes.DEFAULT_OPTICS)
+        self.assertEqual(saved, dest)
+        self.assertTrue(dest.is_file())
+        self.assertEqual(
+            dest.read_text(encoding="utf-8"),
+            scopes.build_theater(12.0, scopes.DEFAULT_OPTICS),
+        )
+
+    def test_creates_missing_parent_dirs(self):
+        dest = self.base / "a" / "b" / "c" / "multilut_zoom.theater"
+        scopes.export_theater_file(dest, 5.0, scopes.DEFAULT_OPTICS)
+        self.assertTrue(dest.is_file())
+
+    def test_rejects_directory_destination(self):
+        dest = self.base / "subdir"
+        dest.mkdir()
+        with self.assertRaises(MultiLUTError):
+            scopes.export_theater_file(dest, 12.0, scopes.DEFAULT_OPTICS)
+
+    def test_rejects_invalid_target_without_writing(self):
+        dest = self.base / "multilut_zoom.theater"
+        with self.assertRaises(MultiLUTError):
+            scopes.export_theater_file(dest, 99.0, scopes.DEFAULT_OPTICS)
+        self.assertFalse(dest.exists())
+
+    def test_rejects_unknown_optic(self):
+        dest = self.base / "multilut_zoom.theater"
+        with self.assertRaises(MultiLUTError):
+            scopes.export_theater_file(dest, 12.0, ["luneta_inexistente"])
+        self.assertFalse(dest.exists())
+
+    def test_overwrites_existing_file(self):
+        dest = self.base / "multilut_zoom.theater"
+        dest.write_text("conteudo antigo", encoding="utf-8")
+        scopes.export_theater_file(dest, 10.0, scopes.DEFAULT_OPTICS)
+        self.assertEqual(
+            dest.read_text(encoding="utf-8"),
+            scopes.build_theater(10.0, scopes.DEFAULT_OPTICS),
+        )

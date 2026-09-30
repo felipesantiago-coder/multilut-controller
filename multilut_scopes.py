@@ -299,6 +299,32 @@ def apply_zoom(game_dir: Path | str, target_mag: float,
     return target
 
 
+def export_theater_file(dest_path: Path | str, target_mag: float,
+                        optic_ids: list[str] | tuple[str, ...]) -> Path:
+    """Gera o theater das lunetas ampliadas em um caminho à escolha do usuário.
+
+    Destino típico: arquivo para enviar ao administrador de um servidor de
+    terceiros que autorizou a instalação — o theater é instalado NO SERVIDOR
+    e passa a valer para todos os jogadores igualmente, sem alterar o cliente.
+    """
+    path = Path(dest_path).expanduser()
+    if path.is_dir():
+        raise MultiLUTError(
+            f"O destino é uma pasta; informe o caminho completo do arquivo: {path}"
+        )
+    # build_theater valida alvo e lunetas ANTES de gravar qualquer coisa.
+    text = build_theater(target_mag, optic_ids)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+        _atomic_write(path, text, mode)
+    except OSError as exc:
+        raise MultiLUTError(
+            f"Não foi possível gravar o arquivo do theater: {exc}"
+        ) from exc
+    return path
+
+
 def revert_zoom(game_dir: Path | str) -> bool:
     """Remove o theater e as linhas de ativação. True se algo mudou."""
     path = _validate_game_dir(game_dir)
