@@ -172,10 +172,33 @@ A pagina "Sistema" concentra o diagnostico e a manutencao:
 SIMULACAO DE LUT (OPCIONAL)
 ---------------------------
 
-Com python3-numpy e python3-pillow instalados, o painel de detalhes pode
-mostrar uma aproximacao do efeito do perfil aplicado a foto do mapa, antes
-de voce aplicar o perfil no jogo. Sem esses pacotes o aplicativo funciona
-normalmente — o item aparece como informativo na pagina Sistema.
+Com python3-numpy e python3-pillow instalados, o painel de detalhes ganha o
+card "Pre-visualizacao (simulacao)": lado a lado, a foto do mapa original e a
+foto processada pela simulacao em CPU do pipeline completo do shader
+(recuperacao de sombras, brilho protegido, LUT trilinear do atlas v1.8,
+mistura luma/croma, contraste local, saturacao, separacao de cores e
+compressao de highlights). As constantes de cada perfil (P_CHROMA, P_LUMA...)
+sao lidas do proprio shader .fx, entao a simulacao acompanha o arquivo
+instalado; o perfil 0 e bypass real, igual no jogo.
+
+- O seletor no card escolhe a foto-base da simulacao (qualquer mapa com foto
+  oficial). Perfis de mapa selecionam a propria foto automaticamente; perfis
+  utilitarios/competitivos mantem a ultima escolhida. A escolha fica salva no
+  config.json.
+- A simulacao roda em segundo plano (o perfil atual e trocado sem travar a
+  interface) e o texto abaixo da imagem mostra o tempo gasto. E uma
+  aproximacao: o contraste local usa a escala da previa e o jogo aplica o
+  shader na resolucao nativa, entao pode haver pequena diferenca de nitidez.
+- Sem numpy/Pillow o aplicativo funciona normalmente: o card informa como
+  instalar e o item "Simulacao de LUT (Pillow/numpy)" da pagina Sistema fica
+  informativo.
+- A CLI tambem simula, sem abrir janela:
+
+    multilut-ctl preview 6                  # Heights sobre a propria foto
+    multilut-ctl preview 14 --mapa sinjar   # Competitivo neutro em Sinjar
+    multilut-ctl preview 3 -o /tmp/district.png --atlas caminho/atlas.png
+
+  O PNG de saida traz "original | simulado" lado a lado.
 
 LIMPEZA DA FUNCIONALIDADE DE LUNETAS (VERSOES ANTERIORES)
 --------------------------------------------------------

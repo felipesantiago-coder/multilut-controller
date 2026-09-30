@@ -28,6 +28,7 @@ except (ImportError, ValueError) as exc:
 
 import multilut_core as core
 import multilut_extra as extra
+import multilut_preview as preview
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -268,6 +269,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self._programmatic_selection = False
         self._atlas_pixbuf = None
         self._atlas_pixbuf_source = None
+        # pré-visualização LUT (simulação em CPU do shader)
+        self._preview_generation = 0
+        self._preview_programmatic = False
+        self._preview_map_choices: list[tuple[str, str]] = []
         self._game_was_running = None
         self._shader_was_valid = False
         # piloto automático por mapa (console.log)
@@ -683,6 +688,59 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         atlas_card.append(atlas_inner)
         content.append(atlas_card)
 
+        # --- Pré-visualização (simulação em CPU do pipeline do shader) -----
+        preview_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview_card.add_css_class("card")
+        preview_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview_inner.set_margin_start(18)
+        preview_inner.set_margin_end(18)
+        preview_inner.set_margin_top(14)
+        preview_inner.set_margin_bottom(14)
+        preview_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        preview_title = Gtk.Label(label="Pré-visualização (simulação)", xalign=0)
+        preview_title.add_css_class("section-title")
+        preview_title.set_hexpand(True)
+        self._preview_map_choices = self._build_preview_map_choices()
+        preview_model = Gtk.StringList.new(
+            [title for _, title in self._preview_map_choices]
+        )
+        self.preview_dropdown = Gtk.DropDown(model=preview_model)
+        self.preview_dropdown.set_tooltip_text(
+            "Foto do mapa usada como base da simulação"
+        )
+        remembered_slug = str(self.config.get("preview_map") or "")
+        initial_index = next(
+            (
+                i
+                for i, (candidate, _) in enumerate(self._preview_map_choices)
+                if candidate == remembered_slug
+            ),
+            0,
+        )
+        self.preview_dropdown.set_selected(initial_index)  # antes do connect
+        self.preview_dropdown.connect("notify::selected", self.on_preview_map_changed)
+        preview_header.append(preview_title)
+        preview_header.append(self.preview_dropdown)
+        self.preview_picture = Gtk.Picture()
+        self.preview_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.preview_picture.set_can_shrink(True)
+        self.preview_picture.set_size_request(-1, 190)
+        preview_labels = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        preview_label_left = Gtk.Label(label="Original", xalign=0.5, hexpand=True)
+        preview_label_right = Gtk.Label(label="Simulado", xalign=0.5, hexpand=True)
+        for label in (preview_label_left, preview_label_right):
+            label.add_css_class("category-label")
+            preview_labels.append(label)
+        self.preview_status = Gtk.Label(xalign=0, wrap=True)
+        self.preview_status.add_css_class("muted")
+        self.preview_status.set_label("Selecione um perfil para simular o resultado.")
+        preview_inner.append(preview_header)
+        preview_inner.append(self.preview_picture)
+        preview_inner.append(preview_labels)
+        preview_inner.append(self.preview_status)
+        preview_card.append(preview_inner)
+        content.append(preview_card)
+
         self.install_button = Gtk.Button(label="Instalar/atualizar pacote MultiLUT v1.8")
         self.install_button.connect("clicked", self.on_install_bundle)
         content.append(self.install_button)
@@ -732,6 +790,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.detail_tone.set_label(f"Resposta visual: {profile.tone}")
         self._update_detail_photo(profile)
         self.update_atlas_card(profile)
+        self.update_preview_card(profile)
 
     # ------------------------------------------------------- atlas v1.8
     def atlas_source_path(self) -> Path:
@@ -784,6 +843,167 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.atlas_picture.set_paintable(Gdk.Texture.new_for_pixbuf(strip))
         self.atlas_picture.set_visible(True)
         self.atlas_status.set_label(message)
+
+    # --------------------------------------------- pré-visualização (simulação)
+    def _build_preview_map_choices(self) -> list[tuple[str, str]]:
+        """[(slug, título)] das fotos de mapa disponíveis, em ordem alfabética."""
+        choices: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for profile in core.profiles_alphabetical():
+            slug = core.map_image_slug(profile)
+            if slug is None or slug in seen:
+                continue
+            if (MAP_IMAGE_DIR / f"{slug}.jpg").is_file():
+                seen.add(slug)
+                choices.append((slug, profile.name))
+        return choices
+
+    def on_preview_map_changed(self, dropdown, _param) -> None:
+        """Troca da foto-base da simulação no dropdown."""
+        index = dropdown.get_selected()
+        if not self._preview_programmatic and 0 <= index < len(
+            self._preview_map_choices
+        ):
+            self.config["preview_map"] = self._preview_map_choices[index][0]
+            core.save_config(self.config)
+        self._schedule_preview()
+
+    def update_preview_card(self, profile: core.Profile | None = None) -> None:
+        """Agenda a simulação do perfil; perfis de mapa usam a própria foto."""
+        profile = profile or self.selected_profile
+        if not self._preview_map_choices:
+            self.preview_picture.set_visible(False)
+            self.preview_status.set_label(
+                "Pré-visualização indisponível: fotos dos mapas não encontradas."
+            )
+            return
+        own_slug = core.map_image_slug(profile)
+        target = own_slug or str(self.config.get("preview_map") or "")
+        index = next(
+            (
+                i
+                for i, (candidate, _) in enumerate(self._preview_map_choices)
+                if candidate == target
+            ),
+            0,
+        )
+        if index != self.preview_dropdown.get_selected():
+            self._preview_programmatic = True
+            self.preview_dropdown.set_selected(index)  # já agenda a simulação
+            self._preview_programmatic = False
+        else:
+            self._schedule_preview()
+
+    def _schedule_preview(self) -> None:
+        """Valida insumos e roda a simulação em uma thread de fundo."""
+        if not hasattr(self, "preview_picture"):
+            return
+        self._preview_generation += 1
+        generation = self._preview_generation
+        profile = self.selected_profile
+        if not preview.DEPENDENCIES_AVAILABLE:
+            self.preview_picture.set_visible(False)
+            self.preview_status.set_label(
+                "Simulação indisponível: instale numpy e Pillow "
+                "(no Solus: sudo eopkg it python3-numpy python3-pillow) "
+                "e reabra o aplicativo."
+            )
+            return
+        atlas_path = self.atlas_source_path()
+        valid, message = core.validate_texture(atlas_path)
+        if not valid:
+            self.preview_picture.set_visible(False)
+            self.preview_status.set_label(f"Pré-visualização indisponível: {message}")
+            return
+        index = self.preview_dropdown.get_selected()
+        if not (0 <= index < len(self._preview_map_choices)):
+            return
+        slug = self._preview_map_choices[index][0]
+        source = MAP_IMAGE_DIR / f"{slug}.jpg"
+        if not source.is_file():
+            self.preview_picture.set_visible(False)
+            self.preview_status.set_label(f"Foto do mapa não encontrada: {source.name}")
+            return
+        shader_path = self.shader_path
+        if not Path(shader_path).expanduser().is_file():
+            shader_path = BUNDLE_DIR / "Shaders/MultiLUT_Insurgency_Optimized.fx"
+        self.preview_picture.set_visible(True)
+        self.preview_status.set_label("Simulando o pipeline do shader…")
+        worker = threading.Thread(
+            target=self._preview_worker,
+            args=(
+                generation,
+                profile.id,
+                profile.name,
+                source,
+                atlas_path,
+                shader_path,
+                slug,
+            ),
+            daemon=True,
+        )
+        worker.start()
+
+    def _preview_worker(
+        self,
+        generation: int,
+        profile_id: int,
+        profile_name: str,
+        source: Path,
+        atlas_path: Path,
+        shader_path: Path,
+        slug: str,
+    ) -> None:
+        """Thread da simulação; o resultado volta pela fila principal do GLib."""
+        try:
+            result = preview.render_preview(
+                profile_id, source, atlas_path, shader_path, max_width=768
+            )
+            composed = preview.compose_side_by_side(
+                result["original"], result["simulated"]
+            )
+            payload = {
+                "png": preview.png_bytes(composed),
+                "status": (
+                    f"Perfil {profile_id:02d} — {profile_name} sobre “{slug}”, "
+                    f"simulado em {result['elapsed_ms']:.0f} ms. Aproximação em "
+                    "CPU do pipeline completo do shader; contraste local usa a "
+                    "escala da prévia."
+                ),
+            }
+        except preview.PreviewError as exc:
+            payload = {"error": str(exc)}
+        except Exception as exc:  # nunca derrubar o app por causa da prévia
+            payload = {"error": f"Falha inesperada na simulação: {exc}"}
+        GLib.idle_add(self._preview_done, generation, payload)
+
+    def _preview_done(self, generation: int, payload: dict) -> bool:
+        if generation != self._preview_generation:
+            return False  # obsoleto: outro perfil foi selecionado enquanto rodava
+        if "error" in payload:
+            self.preview_picture.set_visible(False)
+            self.preview_status.set_label(payload["error"])
+            return False
+        texture = self._texture_from_png_bytes(payload["png"])
+        if texture is not None:
+            self.preview_picture.set_paintable(texture)
+            self.preview_picture.set_visible(True)
+        self.preview_status.set_label(payload["status"])
+        return False
+
+    def _texture_from_png_bytes(self, data: bytes) -> Gdk.Texture | None:
+        try:
+            return Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
+        except (AttributeError, GLib.Error, TypeError):
+            pass
+        try:  # GTK antigo sem new_from_bytes: usa arquivo no cache
+            cache_dir = Path.home() / ".cache/multilut-controller"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            path = cache_dir / "preview.png"
+            path.write_bytes(data)
+            return Gdk.Texture.new_from_filename(str(path))
+        except (GLib.Error, OSError, AttributeError):
+            return None
 
     def copy_to_clipboard(self, text: str, confirmation: str) -> None:
         display = Gdk.Display.get_default()
