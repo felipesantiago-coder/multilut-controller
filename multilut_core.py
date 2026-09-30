@@ -102,6 +102,23 @@ def profiles_by_section(
     return tuple(sections)
 
 
+def map_image_slug(profile: Profile) -> str | None:
+    """Slug do arquivo de foto oficial do mapa para o perfil, ou None.
+
+    As fotos vêm dos depots oficiais do jogo (materials/vgui/maps/
+    <mapa>_large.vtf) e ficam em assets/maps/<slug>.jpg. Perfis que não
+    são de mapa não têm foto própria.
+    """
+    if profile.category != "Mapa":
+        return None
+    decomposed = unicodedata.normalize("NFKD", profile.name)
+    without_accents = "".join(
+        char for char in decomposed if not unicodedata.combining(char)
+    )
+    slug = re.sub(r"[^a-z0-9]", "", without_accents.casefold())
+    return slug or None
+
+
 class MultiLUTError(RuntimeError):
     """A user-facing MultiLUT operation error."""
 

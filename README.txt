@@ -71,12 +71,23 @@ COMO USAR
    - "Efeitos de mapa": perfis criados para um mapa especifico (Buhriz,
      Contact, District, Dry Canal, Embassy, Heights, Kandagal, Market,
      Ministry, Panj, Peak, Revolt, Siege, Sinjar, Station, Tell, Uprising
-     e Verticality).
+     e Verticality). Cada perfil aparece como um cartao com a foto oficial
+     do mapa ao fundo e o nome do mapa em destaque; o painel de detalhes
+     tambem mostra a foto em tamanho maior.
    - "Efeitos utilitarios": perfis que valem em qualquer cenario —
      interiores escuros, longa distancia, competitivos e o neutro de
      referencia.
 
    As duas secoes sao alfabeticas; a busca no topo cobre as duas.
+
+   Sobre as fotos dos cartoes: sao as artes oficiais de selecao de mapa do
+   proprio Insurgency, extraidas dos depots do servidor dedicado no Steam
+   (materials/vgui/maps/<mapa>_large.vtf) e embaladas junto ao aplicativo
+   em assets/maps/. Sao propriedade da New World Interactive, usadas aqui
+   apenas como referencia visual em uma ferramenta gratuita para o jogo;
+   nenhuma parte do jogo e modificada por elas. Se algum arquivo estiver
+   ausente, o cartao cai num degradê com a cor de destaque do tema e o
+   aplicativo segue funcionando normalmente.
 2. Leia a indicacao e o comportamento visual esperado.
 3. Clique em "Aplicar perfil".
 4. Inicie o jogo normalmente ou use "Aplicar e iniciar o jogo".

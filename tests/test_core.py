@@ -105,5 +105,46 @@ class SectionTests(unittest.TestCase):
         self.assertTrue(all(profile.category != "Mapa" for profile in utilitarios[1]))
 
 
+class MapImageTests(unittest.TestCase):
+    """Fotos oficiais dos mapas usadas nos cartões da interface."""
+
+    ASSETS_MAPS = Path(__file__).resolve().parent.parent / "assets" / "maps"
+
+    def test_slug_strips_spaces_and_accents(self):
+        dry_canal = next(p for p in core.PROFILES if p.name == "Dry Canal")
+        self.assertEqual(core.map_image_slug(dry_canal), "drycanal")
+
+    def test_non_map_profiles_have_no_image(self):
+        for profile in core.PROFILES:
+            if profile.category != "Mapa":
+                self.assertIsNone(core.map_image_slug(profile))
+
+    def test_map_profiles_have_valid_slug(self):
+        for profile in core.PROFILES:
+            slug = core.map_image_slug(profile)
+            if profile.category == "Mapa":
+                self.assertTrue(slug)
+                self.assertEqual(slug, slug.lower())
+                self.assertTrue(slug.isalnum(), slug)
+            else:
+                self.assertIsNone(slug)
+
+    def test_every_map_profile_has_official_image(self):
+        missing = [
+            profile.name
+            for profile in core.PROFILES
+            if profile.category == "Mapa"
+            and not (self.ASSETS_MAPS / f"{core.map_image_slug(profile)}.jpg").is_file()
+        ]
+        self.assertEqual(missing, [], "fotos oficiais ausentes em assets/maps")
+
+    def test_map_images_are_readable_jpeg(self):
+        for path in sorted(self.ASSETS_MAPS.glob("*.jpg")):
+            with self.subTest(arquivo=path.name):
+                self.assertGreater(path.stat().st_size, 10_000, path.name)
+                header = path.read_bytes()[:2]
+                self.assertEqual(header, b"\xff\xd8", path.name)
+
+
 if __name__ == "__main__":
     unittest.main()

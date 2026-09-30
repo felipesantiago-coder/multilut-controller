@@ -27,6 +27,7 @@ import multilut_core as core
 
 BASE_DIR = Path(__file__).resolve().parent
 BUNDLE_DIR = BASE_DIR / "bundle"
+MAP_IMAGE_DIR = BASE_DIR / "assets" / "maps"
 
 
 CSS = b"""
@@ -63,6 +64,46 @@ window { background: @window_bg_color; }
 .sidebar { background: alpha(@headerbar_bg_color, 0.72); }
 list row { border-radius: 10px; margin: 2px 6px; }
 list row:selected { background: alpha(@accent_bg_color, 0.18); }
+.map-card {
+  border-radius: 12px;
+}
+.map-card:hover { filter: brightness(1.08); }
+.map-scrim {
+  min-height: 78px;
+  background-image: linear-gradient(
+    to bottom,
+    alpha(#000000, 0.22) 0%,
+    alpha(#000000, 0.10) 45%,
+    alpha(#000000, 0.68) 100%
+  );
+}
+.map-card-fallback {
+  min-height: 78px;
+  background: linear-gradient(
+    to bottom,
+    alpha(@accent_bg_color, 0.30),
+    alpha(@accent_bg_color, 0.55)
+  );
+}
+.map-card-title {
+  font-size: 17px;
+  font-weight: 800;
+  color: #ffffff;
+  text-shadow: 0 1px 3px alpha(#000000, 0.9), 0 0 8px alpha(#000000, 0.55);
+}
+.map-card-badge {
+  background: alpha(#000000, 0.45);
+  color: #ffffff;
+  border-radius: 999px;
+  font-weight: 800;
+  font-size: 12px;
+  min-width: 26px;
+  min-height: 26px;
+}
+.map-card-frame {
+  border-radius: 12px;
+  border: 1px solid alpha(currentColor, 0.12);
+}
 """
 
 
@@ -96,7 +137,6 @@ class ProfileRow(Gtk.ListBoxRow):
 
 class SectionHeaderRow(Gtk.ListBoxRow):
     """Cabeçalho de seção da lista de perfis (não selecionável)."""
-
     def __init__(self, title: str):
         super().__init__()
         self.set_selectable(False)
@@ -108,6 +148,76 @@ class SectionHeaderRow(Gtk.ListBoxRow):
         label.set_margin_bottom(2)
         label.set_margin_start(16)
         self.set_child(label)
+
+
+class MapCardRow(Gtk.ListBoxRow):
+    """Cartão de perfil de mapa: foto oficial de fundo + nome em destaque.
+
+    A foto vem de assets/maps/<slug>.jpg (extraída dos depots oficiais do
+    jogo). Sem a foto, cai num degradê com a cor de destaque do tema.
+    """
+
+    CARD_HEIGHT = 84
+
+    def __init__(self, profile: core.Profile, image_path: Path | None):
+        super().__init__()
+        self.profile = profile
+        overlay = Gtk.Overlay()
+        overlay.add_css_class("map-card")
+        if hasattr(Gtk, "Overflow") and hasattr(overlay, "set_overflow"):
+            # GTK 4.8+: recorta a foto nos cantos arredondados do cartão.
+            overlay.set_overflow(Gtk.Overflow.HIDDEN)
+        overlay.set_size_request(-1, self.CARD_HEIGHT)
+
+        if image_path is not None and image_path.is_file():
+            background = Gtk.Picture()
+            try:
+                texture = Gdk.Texture.new_from_filename(str(image_path))
+                background.set_paintable(texture)
+            except (GLib.Error, AttributeError):
+                pass
+            if hasattr(Gtk, "ContentFit"):
+                background.set_content_fit(Gtk.ContentFit.COVER)
+            else:  # GTK < 4.8: mantém proporção cortando pelo meio
+                background.set_keep_aspect_ratio(False)
+            background.set_can_shrink(True)
+            background.set_hexpand(True)
+            background.set_vexpand(True)
+        else:
+            background = Gtk.Box()
+            background.add_css_class("map-card-fallback")
+            background.set_hexpand(True)
+            background.set_vexpand(True)
+        overlay.set_child(background)
+
+        scrim = Gtk.Box()
+        scrim.add_css_class("map-scrim")
+        scrim.set_hexpand(True)
+        scrim.set_vexpand(True)
+        overlay.add_overlay(scrim)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        content.set_margin_top(8)
+        content.set_margin_bottom(8)
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+        content.set_valign(Gtk.Align.END)
+        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        title_box.set_valign(Gtk.Align.END)
+        title = Gtk.Label(label=profile.name, xalign=0)
+        title.add_css_class("map-card-title")
+        title.set_ellipsize(Pango.EllipsizeMode.END)
+        title.set_hexpand(True)
+        title_box.append(title)
+        content.append(title_box)
+        badge = Gtk.Label(label=f"{profile.id:02d}")
+        badge.add_css_class("map-card-badge")
+        badge.set_valign(Gtk.Align.CENTER)
+        badge.set_halign(Gtk.Align.END)
+        content.append(badge)
+        overlay.add_overlay(content)
+
+        self.set_child(overlay)
 
 
 class MultiLUTWindow(Adw.ApplicationWindow):
@@ -288,11 +398,18 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         self.profile_list = Gtk.ListBox()
         self.profile_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.profile_list.set_css_classes(["profiles-list"])
         self.profile_list.connect("row-selected", self.on_profile_selected)
         for section_title, profiles in core.profiles_by_section():
             self.profile_list.append(SectionHeaderRow(section_title))
             for profile in profiles:
-                self.profile_list.append(ProfileRow(profile))
+                slug = core.map_image_slug(profile)
+                if slug is not None:
+                    self.profile_list.append(
+                        MapCardRow(profile, MAP_IMAGE_DIR / f"{slug}.jpg")
+                    )
+                else:
+                    self.profile_list.append(ProfileRow(profile))
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
@@ -345,6 +462,20 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         hero.append(self.detail_title)
         hero.append(self.detail_summary)
         content.append(hero)
+
+        photo_frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        photo_frame.add_css_class("map-card-frame")
+        if hasattr(Gtk, "Overflow") and hasattr(photo_frame, "set_overflow"):
+            photo_frame.set_overflow(Gtk.Overflow.HIDDEN)
+        self.detail_photo = Gtk.Picture()
+        if hasattr(Gtk, "ContentFit"):
+            self.detail_photo.set_content_fit(Gtk.ContentFit.COVER)
+        self.detail_photo.set_can_shrink(True)
+        self.detail_photo.set_height_request(180)
+        photo_frame.append(self.detail_photo)
+        photo_frame.set_visible(False)
+        self.detail_photo_frame = photo_frame
+        content.append(photo_frame)
 
         information = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         information.add_css_class("card")
@@ -442,6 +573,20 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.detail_summary.set_label(profile.summary)
         self.detail_best.set_label(profile.best_for)
         self.detail_tone.set_label(f"Resposta visual: {profile.tone}")
+        self._update_detail_photo(profile)
+
+    def _update_detail_photo(self, profile: core.Profile) -> None:
+        """Mostra a foto oficial do mapa no painel de detalhes, quando houver."""
+        slug = core.map_image_slug(profile)
+        path = MAP_IMAGE_DIR / f"{slug}.jpg" if slug else None
+        if path is not None and path.is_file():
+            try:
+                self.detail_photo.set_paintable(Gdk.Texture.new_from_filename(str(path)))
+                self.detail_photo_frame.set_visible(True)
+            except (GLib.Error, AttributeError):
+                self.detail_photo_frame.set_visible(False)
+        else:
+            self.detail_photo_frame.set_visible(False)
 
     def select_profile_id(self, profile_id: int) -> None:
         # A lista aparece em seções alfabéticas: localize pelo id do perfil,
