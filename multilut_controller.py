@@ -471,7 +471,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         if hasattr(Gtk, "ContentFit"):
             self.detail_photo.set_content_fit(Gtk.ContentFit.COVER)
         self.detail_photo.set_can_shrink(True)
-        self.detail_photo.set_height_request(180)
+        self.detail_photo.set_size_request(-1, 180)
         photo_frame.append(self.detail_photo)
         photo_frame.set_visible(False)
         self.detail_photo_frame = photo_frame
