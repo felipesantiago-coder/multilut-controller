@@ -493,7 +493,9 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         launch_title = Gtk.Label(label="Ativar pela opção de inicialização do Steam", xalign=0)
         launch_hint = Gtk.Label(
             label="Grava +mp_theater_override multilut_zoom nas opções de "
-            "inicialização do jogo (método garantido; requer Steam fechado)",
+            "inicialização do jogo (requer Steam fechado). Nos modos coop o "
+            "playlist do jogo sobrepõe essa opção — a ativação principal é o "
+            "listenserver.cfg, feita automaticamente ao Ativar",
             xalign=0,
         )
         launch_hint.add_css_class("category-label")
@@ -526,13 +528,15 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         note = Gtk.Label(
             label=(
-                "Como funciona: o jogo escolhe o theater no início de cada partida "
-                "local. O aplicativo grava o theater multilut_zoom e ativa pelo "
-                "cfg/listenserver.cfg (lido pelo jogo a cada partida, solo "
-                "incluído), pela opção de inicialização do Steam e pelo "
-                "autoexec.cfg quando o jogo o executa. Comando manual no console "
-                "precisa de um mapa recarregado depois (changelevel) — no meio da "
-                "partida ele apenas reinicia a rodada."
+                "Como funciona: os playlists coop do jogo forçam o theater "
+                "classic — o nosso override herda esse classic inteiro "
+                "(squads, classes, armas) e troca só os FOVs das lunetas. O "
+                "aplicativo grava o theater multilut_zoom e ativa pelo "
+                "cfg/listenserver.cfg, executado pelo jogo depois dos "
+                "playlists a cada partida local (solo incluso). Comando manual "
+                "no console precisa de um mapa recarregado depois "
+                "(changelevel) — no meio da partida ele apenas reinicia a "
+                "rodada."
             ),
             xalign=0,
             wrap=True,

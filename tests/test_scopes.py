@@ -48,6 +48,16 @@ class BuildTheaterTests(unittest.TestCase):
         for base in scopes.THEATER_BASE_CHAIN:
             self.assertIn(f'"#base" "{base}"', text)
 
+    def test_bases_classic_coop_theater(self):
+        """O override substitui o classic (forçado pelos playlists coop),
+        então precisa herdá-lo inteiro — sem os squads o modo quebra com
+        PLAYER LIMIT REACHED (0/0)."""
+        self.assertEqual(scopes.THEATER_BASE_CHAIN, ("classic.theater",))
+        text = scopes.build_theater(12.0, scopes.DEFAULT_OPTICS)
+        self.assertIn('"#base" "classic.theater"', text)
+        # a cadeia PvP antiga não pode voltar (falta squads/templates coop)
+        self.assertNotIn('"base_player.theater"', text)
+
     def test_seven_x_values_at_twelve(self):
         text = scopes.build_theater(12.0, ["optic_scope_7x"])
         self.assertIn('"fov_wpn_scope"\t\t\t\t"5.83"', text)

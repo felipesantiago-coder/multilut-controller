@@ -2,10 +2,14 @@
 """Ampliação das lunetas do Insurgency (2014) via theaters nativos.
 
 O Insurgency define armas e acessórios em arquivos "theater" (KeyValues)
-em insurgency/scripts/theaters. Um theater customizado apontado por
-mp_theater_override substitui o padrão quando você hospeda a partida —
-é o mecanismo oficial do jogo: nenhum VPK é alterado e desfazer é só
-remover o arquivo gerado.
+em insurgency/scripts/theaters. Os playlists coop do jogo forçam
+mp_theater_override "classic" (forced_cvars do conquer/coop.playlist), e
+um theater customizado apontado por mp_theater_override SUBSTITUI esse
+classic quando você hospeda a partida — é o mecanismo oficial do jogo:
+enhum VPK é alterado e desfazer é só remover o arquivo gerado.
+
+Por isso o theater gerado #baseia o classic.theater inteiro (squads,
+templates coop, gear/ammo) e sobrescreve apenas o bloco weapon_upgrades.
 
 A ampliação efetiva de cada luneta vem de fov_wpn_scope, dentro do bloco
 optics_fov_override do upgrade da óptica: quanto MENOR o FOV, maior o
@@ -92,15 +96,17 @@ OPTIC_WEAPON_FOVS: dict[str, tuple[tuple[str, float], ...]] = {
     ),
 }
 
-# Encadeamento idêntico ao default.theater do jogo: o override precisa
-# carregar as mesmas bases para não perder player/gear/armas.
+# Encadeamento do override. O theater é escolhido por playlist, e os playlists
+# coop do jogo (nwi/conquer, nwi/coop…) FORÇAM mp_theater_override "classic"
+# via forced_cvars — o console mostra "Server loading custom theater 'classic'".
+# O classic.theater #baseia default_coop_shared.theater (arquivos _test de
+# gear/ammo e os templates de jogador _classic) e define os squads do modo
+# coop. Como o override SUBSTITUI o classic, ele precisa herdá-lo inteiro:
+# sem isso faltam squads/templates e o jogo rejeita o jogador com
+# "PLAYER LIMIT REACHED (0/0)". O bloco weapon_upgrades deste arquivo é
+# mesclado POR CIMA do classic (chave a chave), trocando só os FOVs.
 THEATER_BASE_CHAIN: tuple[str, ...] = (
-    "base_player.theater",
-    "base_common_ammo.theater",
-    "default_gear.theater",
-    "default_weapon.theater",
-    "default_weapon_upgrades.theater",
-    "default_base.theater",
+    "classic.theater",
 )
 
 

@@ -105,30 +105,38 @@ COMO FUNCIONA:
   weapon_fal, weapon_m40a1…) que o theater oficial define dentro de
   optics_fov_override — sem isso o jogo ignora o FOV novo e a luneta
   fica sem ampliação extra.
+- O theater gerado herda o classic.theater inteiro (#base): squads,
+  classes coop, gear e armas continuam os oficiais — só os FOVs das
+  lunetas mudam. Isso é obrigatório: os playlists coop do jogo forçam o
+  theater classic, e substituí-lo sem herdar os squads quebra o modo
+  (o jogo rejeita o jogador com "PLAYER LIMIT REACHED (0/0)").
 - Nenhum VPK ou arquivo original do jogo é modificado: o theater é um
   arquivo novo, e restaurar o padrão é apagar o arquivo e os blocos de
   ativação no autoexec.cfg, no listenserver.cfg e a opção de inicialização
   (o botão "Restaurar padrão do jogo" faz tudo isso).
 
-ATIVAÇÃO (o jogo escolhe o theater no início de cada partida local):
+ATIVAÇÃO (o playlist coop força mp_theater_override "classic"; para vencer
+isso, a ativação precisa acontecer DEPOIS dos playlists):
 
-1. Ativação automática por partida (recomendado): ao clicar em "Ativar
-   lunetas ampliadas", o aplicativo grava mp_theater_override
-   "multilut_zoom" no cfg/listenserver.cfg do jogo. O Insurgency executa
-   esse arquivo ao iniciar qualquer partida hospedada por você — o modo
-   solo também, pois é um servidor local — ANTES de escolher o theater.
-   Em instalações limpas o arquivo nem existe (o console mostra "exec:
-   couldn't exec listenserver.cfg"), então criá-lo é seguro. Vale já na
-   PRÓXIMA partida: saia da partida atual e comece outra — não precisa
-   reiniciar o jogo.
-2. Opção de inicialização do Steam: o aplicativo também grava
-   +mp_theater_override multilut_zoom nas opções de inicialização do
-   jogo. Requer o Steam fechado na hora de aplicar (o Steam regrava o
-   localconfig.vdf ao sair); um backup localconfig.vdf.multilut.bak é
-   criado na primeira alteração.
+1. Ativação automática por partida (recomendado, único que vence o
+   playlist): ao clicar em "Ativar lunetas ampliadas", o aplicativo grava
+   mp_theater_override "multilut_zoom" no cfg/listenserver.cfg do jogo.
+   O Insurgency executa esse arquivo ao iniciar qualquer partida hospedada
+   por você — o modo solo também, pois é um servidor local — DEPOIS de
+   aplicar os playlists e ANTES de escolher o theater, então é o único
+   ponto que sobrepõe o "classic" forçado. Em instalações limpas o arquivo
+   nem existe (o console mostra "exec: couldn't exec listenserver.cfg"),
+   então criá-lo é seguro. Vale já na PRÓXIMA partida: saia da partida
+   atual e comece outra — não precisa reiniciar o jogo.
+2. Opção de inicialização do Steam: grava +mp_theater_override
+   multilut_zoom nas opções de inicialização. Nos modos coop o playlist
+   do jogo sobrepõe esse valor (forced_cvars), então vale como reforço —
+   não como ativação principal. Requer o Steam fechado na hora de aplicar
+   (o Steam regrava o localconfig.vdf ao sair); backup
+   localconfig.vdf.multilut.bak é criado na primeira alteração.
 3. autoexec.cfg: o bloco gravado no cfg/autoexec.cfg do jogo ativa
-   sozinho — mas o Insurgency (2014) nem sempre executa o autoexec.cfg,
-   por isso os métodos 1 e 2 são mais confiáveis.
+   sozinho — mas o Insurgency (2014) nem sempre o executa e, como o
+   autoexec roda antes dos playlists, o coop sobrepõe o valor.
 4. Console do jogo (manual): mp_theater_override multilut_zoom só vale
    depois de um mapa ser recarregado (changelevel <mapa>, ou sair da
    partida e começar outra). Digitado no MEIO da partida, o comando
