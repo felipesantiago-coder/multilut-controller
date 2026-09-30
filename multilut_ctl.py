@@ -172,6 +172,16 @@ def cmd_preview(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    resolution = args.resolucao
+    if resolution is None:  # configuração do aplicativo, quando válida
+        config = core.load_config()
+        try:
+            resolution = (
+                int(config.get("game_width")),
+                int(config.get("game_height")),
+            )
+        except (TypeError, ValueError):
+            resolution = None
     profile = match_profile(args.target)
     shader = resolve_shader(args.shader)
     atlas = resolve_atlas(args.atlas)
@@ -184,13 +194,20 @@ def cmd_preview(args: argparse.Namespace) -> int:
     source = module_dir / "assets/maps" / f"{slug}.jpg"
     if not source.is_file():
         raise core.MultiLUTError(f"Foto do mapa não encontrada: {source}")
-    result = preview.render_preview(profile.id, source, atlas, shader)
+    result = preview.render_preview(
+        profile.id, source, atlas, shader, game_resolution=resolution
+    )
     composed = preview.compose_side_by_side(result["original"], result["simulated"])
     output = Path(args.saida).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(preview.png_bytes(composed))
+    resolved_w, resolved_h = result["game_resolution"]
     print(f"Perfil {profile.id:02d} — {profile.name}")
     print(f"  base: {source.name}  atlas: {atlas}")
+    print(
+        f"  resolução do jogo: {resolved_w}x{resolved_h} "
+        "(raio do contraste local escalado)"
+    )
     print(f"  simulado em {result['elapsed_ms']:.0f} ms -> {output}")
     return 0
 
@@ -238,6 +255,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     preview_parser.add_argument(
         "--atlas", help="PNG do atlas v1.8 alternativo (padrão: instalado ou pacote)"
+    )
+    preview_parser.add_argument(
+        "--resolucao",
+        help="resolução de render do jogo (ex.: 1366x768); escala o contraste local",
     )
     preview_parser.add_argument(
         "--saida", "-o", default="multilut_preview.png", help="PNG de saída"

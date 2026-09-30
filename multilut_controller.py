@@ -273,6 +273,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self._preview_generation = 0
         self._preview_programmatic = False
         self._preview_map_choices: list[tuple[str, str]] = []
+        self.game_resolution = self._game_resolution_from_config()
         self._game_was_running = None
         self._shader_was_valid = False
         # piloto automático por mapa (console.log)
@@ -721,6 +722,29 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.preview_dropdown.connect("notify::selected", self.on_preview_map_changed)
         preview_header.append(preview_title)
         preview_header.append(self.preview_dropdown)
+        # resolução do jogo: escala o raio do contraste local (P_RADIUS) na simulação
+        self.resolution_choices = self._build_resolution_choices()
+        resolution_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        resolution_label = Gtk.Label(label="Resolução do jogo:", xalign=0)
+        resolution_label.add_css_class("muted")
+        resolution_label.set_hexpand(True)
+        resolution_model = Gtk.StringList.new(self.resolution_choices)
+        self.resolution_dropdown = Gtk.DropDown(model=resolution_model)
+        self.resolution_dropdown.set_tooltip_text(
+            "Resolução de render configurada no jogo; o raio do contraste local "
+            "da simulação é escalado por ela"
+        )
+        current_resolution = "x".join(str(v) for v in self.game_resolution)
+        self.resolution_dropdown.set_selected(
+            self.resolution_choices.index(current_resolution)
+            if current_resolution in self.resolution_choices
+            else 0
+        )  # antes do connect
+        self.resolution_dropdown.connect(
+            "notify::selected", self.on_preview_resolution_changed
+        )
+        resolution_box.append(resolution_label)
+        resolution_box.append(self.resolution_dropdown)
         self.preview_picture = Gtk.Picture()
         self.preview_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         self.preview_picture.set_can_shrink(True)
@@ -735,6 +759,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.preview_status.add_css_class("muted")
         self.preview_status.set_label("Selecione um perfil para simular o resultado.")
         preview_inner.append(preview_header)
+        preview_inner.append(resolution_box)
         preview_inner.append(self.preview_picture)
         preview_inner.append(preview_labels)
         preview_inner.append(self.preview_status)
@@ -845,6 +870,47 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.atlas_status.set_label(message)
 
     # --------------------------------------------- pré-visualização (simulação)
+    def _game_resolution_from_config(self) -> tuple[int, int]:
+        """Resolução de render do jogo no config.json (padrão 1366x768)."""
+        try:
+            return preview.parse_game_resolution(
+                (int(self.config.get("game_width")), int(self.config.get("game_height")))
+            )
+        except (TypeError, ValueError, preview.PreviewError):
+            return preview.DEFAULT_GAME_RESOLUTION
+
+    def _build_resolution_choices(self) -> list[str]:
+        """Resoluções comuns + a configurada (quando fora da lista)."""
+        choices = [
+            "1280x720",
+            "1366x768",
+            "1440x900",
+            "1600x900",
+            "1920x1080",
+            "2560x1440",
+            "3440x1440",
+            "3840x2160",
+        ]
+        current = "x".join(str(v) for v in self.game_resolution)
+        if current not in choices:
+            choices.append(current)
+        return choices
+
+    def on_preview_resolution_changed(self, dropdown, _param) -> None:
+        """Troca da resolução do jogo usada para escalar o raio local."""
+        index = dropdown.get_selected()
+        if not (0 <= index < len(self.resolution_choices)):
+            return
+        try:
+            self.game_resolution = preview.parse_game_resolution(
+                self.resolution_choices[index]
+            )
+        except preview.PreviewError:
+            return
+        self.config["game_width"], self.config["game_height"] = self.game_resolution
+        core.save_config(self.config)
+        self._schedule_preview()
+
     def _build_preview_map_choices(self) -> list[tuple[str, str]]:
         """[(slug, título)] das fotos de mapa disponíveis, em ordem alfabética."""
         choices: list[tuple[str, str]] = []
@@ -939,6 +1005,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                 atlas_path,
                 shader_path,
                 slug,
+                self.game_resolution,
             ),
             daemon=True,
         )
@@ -953,22 +1020,29 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         atlas_path: Path,
         shader_path: Path,
         slug: str,
+        game_resolution: tuple[int, int],
     ) -> None:
         """Thread da simulação; o resultado volta pela fila principal do GLib."""
         try:
             result = preview.render_preview(
-                profile_id, source, atlas_path, shader_path, max_width=768
+                profile_id,
+                source,
+                atlas_path,
+                shader_path,
+                max_width=768,
+                game_resolution=game_resolution,
             )
             composed = preview.compose_side_by_side(
                 result["original"], result["simulated"]
             )
+            resolved_w, resolved_h = result["game_resolution"]
             payload = {
                 "png": preview.png_bytes(composed),
                 "status": (
                     f"Perfil {profile_id:02d} — {profile_name} sobre “{slug}”, "
                     f"simulado em {result['elapsed_ms']:.0f} ms. Aproximação em "
-                    "CPU do pipeline completo do shader; contraste local usa a "
-                    "escala da prévia."
+                    "CPU do pipeline completo do shader; raio do contraste local "
+                    f"escalado pela resolução do jogo ({resolved_w}x{resolved_h})."
                 ),
             }
         except preview.PreviewError as exc:

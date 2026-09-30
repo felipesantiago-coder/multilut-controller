@@ -65,9 +65,45 @@ _DEFINE = re.compile(r"^\s*#define\s+P_([A-Z]+)\s+(-?\d+(?:\.\d+)?)\s*(?:$|//)")
 # kLuma do shader (Rec. 709).
 KLUMA = (0.2126, 0.7152, 0.0722)
 
+# Resolução de render padrão do jogo (configurável na interface e no config.json).
+# No shader, o passo do contraste local é ReShade::PixelSize * P_RADIUS, ou seja,
+# P_RADIUS pixels da resolução nativa — a prévia reproduz essa proporção.
+DEFAULT_GAME_RESOLUTION = (1366, 768)
+
 
 class PreviewError(RuntimeError):
     """Erro user-facing da simulação de LUT."""
+
+
+def parse_game_resolution(value) -> tuple[int, int]:
+    """Converte a resolução do jogo para (largura, altura) inteiros válidos.
+
+    Aceita tuplas/listas de dois números ou texto ``largura x altura``
+    (ex.: "1366x768"). Levanta PreviewError para valores inválidos.
+    """
+    if value is None:
+        return DEFAULT_GAME_RESOLUTION
+    if isinstance(value, str):
+        match = re.fullmatch(
+            r"\s*(\d{2,5})\s*[xX×]\s*(\d{2,5})\s*", value
+        )
+        if not match:
+            raise PreviewError(
+                f"Resolução do jogo inválida: {value!r} (use, por exemplo, 1366x768)."
+            )
+        candidate = (int(match.group(1)), int(match.group(2)))
+    elif isinstance(value, (tuple, list)) and len(value) == 2:
+        try:
+            candidate = (int(value[0]), int(value[1]))
+        except (TypeError, ValueError) as exc:
+            raise PreviewError(f"Resolução do jogo inválida: {value!r}.") from exc
+    else:
+        raise PreviewError(f"Resolução do jogo inválida: {value!r}.")
+    if not (16 <= candidate[0] <= 16384 and 16 <= candidate[1] <= 16384):
+        raise PreviewError(
+            "Resolução do jogo fora do intervalo suportado (16 a 16384 por eixo)."
+        )
+    return candidate
 
 
 # --------------------------------------------------------------------------
@@ -266,23 +302,78 @@ def blend_luma_chroma(
     return np.clip(target_luma[..., None] + ratio * target_luma[..., None], 0.0, 1.0)
 
 
+def local_contrast_step(
+    preview_size: tuple[int, int],
+    game_resolution: tuple[int, int],
+    radius: float,
+) -> tuple[float, float]:
+    """Passo dos 4 taps da prévia em pixels, replicando o shader.
+
+    No jogo o passo é ``P_RADIUS`` pixels da resolução de render
+    (``ReShade::PixelSize * fLUT_LocalRadius``); na prévia o mesmo deslocamento
+    físico corresponde a ``P_RADIUS * prévia/jogo`` pixels por eixo.
+    """
+    preview_w, preview_h = int(preview_size[0]), int(preview_size[1])
+    game_w, game_h = int(game_resolution[0]), int(game_resolution[1])
+    if preview_w <= 0 or preview_h <= 0:
+        raise PreviewError(f"Tamanho da prévia inválido: {preview_size}.")
+    if game_w <= 0 or game_h <= 0:
+        raise PreviewError(f"Resolução do jogo inválida: {game_resolution}.")
+    return (
+        float(radius) * preview_w / game_w,
+        float(radius) * preview_h / game_h,
+    )
+
+
+def _bilinear_sample(
+    image: "np.ndarray", offset_y: float, offset_x: float
+) -> "np.ndarray":
+    """Amostra a imagem deslocada por (offset_y, offset_x) fracionário.
+
+    Equivale ao tex2D com filtro LINEAR e AddressU/V CLAMP da GPU: interpola
+    entre os texels vizinhos e repete a borda fora da imagem.
+    """
+    height, width = image.shape
+    ys = np.arange(height, dtype=np.float32) + np.float32(offset_y)
+    xs = np.arange(width, dtype=np.float32) + np.float32(offset_x)
+
+    def axis(values: "np.ndarray", limit: int):
+        floor = np.floor(values)
+        i0 = np.clip(floor.astype(np.intp), 0, limit)
+        i1 = np.clip(i0 + 1, 0, limit)
+        weight = values - floor
+        weight = np.where(i0 == i1, np.float32(0.0), weight)
+        return i0, i1, weight.astype(np.float32)
+
+    y0, y1, ty = axis(ys, height - 1)
+    x0, x1, tx = axis(xs, width - 1)
+    ty = ty[:, None]
+    tx = tx[None, :]
+    top = image[np.ix_(y0, x0)] * (1.0 - tx) + image[np.ix_(y0, x1)] * tx
+    bottom = image[np.ix_(y1, x0)] * (1.0 - tx) + image[np.ix_(y1, x1)] * tx
+    return top * (1.0 - ty) + bottom * ty
+
+
 def apply_local_contrast(
     color: "np.ndarray",
     original: "np.ndarray",
     const: dict[str, float],
-    radius_px: int = 1,
+    step_px: tuple[float, float] = (1.0, 1.0),
 ) -> "np.ndarray":
-    """Aproximação do contraste local: 4 taps na própria imagem de prévia.
+    """Contraste local: 4 taps com o raio escalado pela resolução do jogo.
 
-    No jogo o passo é um pixel da resolução de render; na prévia é um pixel
-    da imagem simulada, então o efeito é levemente mais forte por área. Os
-    taps usam a luma recuperada do quadro original (RecoveredNeighborLuma).
+    ``step_px`` é o deslocamento dos taps em pixels da prévia por eixo
+    (horizontal, vertical), já contendo ``P_RADIUS * prévia/jogo`` — o mesmo
+    deslocamento físico do shader na resolução configurada do jogo. Os taps
+    usam a luma recuperada do quadro original (RecoveredNeighborLuma) e são
+    amostrados de forma bilinear, como o filtro LINEAR da GPU.
     """
     base = _recover_luma(luma709(original), const)
-    up = np.roll(base, -radius_px, axis=0)
-    down = np.roll(base, radius_px, axis=0)
-    left = np.roll(base, -radius_px, axis=1)
-    right = np.roll(base, radius_px, axis=1)
+    step_x, step_y = float(step_px[0]), float(step_px[1])
+    right = _bilinear_sample(base, 0.0, step_x)
+    left = _bilinear_sample(base, 0.0, -step_x)
+    down = _bilinear_sample(base, step_y, 0.0)
+    up = _bilinear_sample(base, -step_y, 0.0)
     local_average = 0.25 * (up + down + left + right)
 
     current = luma709(color)
@@ -329,18 +420,28 @@ def simulate_pixels(
     pixels: "np.ndarray",
     lut: "np.ndarray",
     const: dict[str, float],
+    game_resolution: tuple[int, int] | None = None,
 ) -> "np.ndarray":
-    """Pipeline completo do shader sobre pixels (h, w, 3) float [0, 1]."""
+    """Pipeline completo do shader sobre pixels (h, w, 3) float [0, 1].
+
+    ``game_resolution`` é a resolução de render configurada do jogo; o raio
+    do contraste local (P_RADIUS) é escalado por ela para o tamanho da prévia.
+    """
     if np is None:
         raise PreviewError("numpy não está disponível.")
     original = np.clip(pixels, 0.0, 1.0).astype(np.float32)
     if profile_id == 0:  # bypass real, como no shader
         return original
+    resolution = parse_game_resolution(game_resolution)
+    height, width = original.shape[:2]
+    step = local_contrast_step(
+        (width, height), resolution, const.get("RADIUS", 1.0)
+    )
     prepared = apply_shadow_and_lowmid(original, const)
     prepared = apply_protected_brightness(prepared, const)
     lut_color = sample_lut(lut, prepared)
     color = blend_luma_chroma(prepared, lut_color, const)
-    color = apply_local_contrast(color, original, const)
+    color = apply_local_contrast(color, original, const, step_px=step)
     color = apply_adaptive_saturation(color, const)
     color = apply_color_separation(color, const)
     color = apply_highlight_protection(color, const)
@@ -401,13 +502,19 @@ def render_preview(
     atlas_path: Path | str,
     shader_path: Path | str,
     max_width: int = 1024,
+    game_resolution: tuple[int, int] | str | None = None,
+    lut_row: int | None = None,
 ) -> dict:
-    """Gera {'original', 'simulated', 'elapsed_ms', 'source_size'}.
+    """Gera {'original', 'simulated', 'elapsed_ms', 'source_size', 'game_resolution'}.
 
     Levanta PreviewError quando atlas/shader/imagem não estiverem acessíveis
-    ou quando as dependências opcionais não existirem.
+    ou quando as dependências opcionais não existirem. ``game_resolution``
+    aceita (largura, altura) ou "largura x altura"; ``lut_row`` permite apontar
+    explicitamente a linha do atlas (reindexação); sem ele vale o mapeamento
+    padrão P_LUT_ROW do shader v1.8.
     """
     started = time.perf_counter()
+    resolution = parse_game_resolution(game_resolution)
     source = load_source_image(source_path, max_width=max_width)
     atlas = load_atlas_array(atlas_path)
     expected = (core.ATLAS_SIZE[1], core.ATLAS_SIZE[0], 3)
@@ -428,10 +535,15 @@ def render_preview(
             f"O shader não define constantes para o perfil {profile_id}."
         )
 
-    lut = lut3d_from_atlas(atlas, core.lut_row_for_profile(int(profile_id)))
+    row = int(lut_row) if lut_row is not None else core.lut_row_for_profile(
+        int(profile_id)
+    )
+    lut = lut3d_from_atlas(atlas, row)
 
     pixels = np.asarray(source, dtype=np.float32) / 255.0
-    simulated = simulate_pixels(int(profile_id), pixels, lut, const)
+    simulated = simulate_pixels(
+        int(profile_id), pixels, lut, const, game_resolution=resolution
+    )
     simulated_image = Image.fromarray(
         (np.clip(simulated, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
     )
@@ -441,6 +553,7 @@ def render_preview(
         "simulated": simulated_image,
         "elapsed_ms": elapsed_ms,
         "source_size": source.size,
+        "game_resolution": resolution,
     }
 
 

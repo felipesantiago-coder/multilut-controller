@@ -300,11 +300,29 @@ def _ref_pipeline_pixel(rgb, original_img, y, x, lut, const):
     def recovered_at(yy, xx):
         return recover(luma(original_img[yy, xx].tolist()))
 
+    # Passo do shader: ReShade::PixelSize * fLUT_LocalRadius — na prévia, o
+    # mesmo deslocamento físico escala por prévia/resolução-do-jogo por eixo.
+    game_w, game_h = preview.DEFAULT_GAME_RESOLUTION
+    height, width = original_img.shape[0], original_img.shape[1]
+    step_x = const["RADIUS"] * width / game_w
+    step_y = const["RADIUS"] * height / game_h
+
+    def recovered_sample(fy, fx):
+        """tex2D LINEAR + CLAMP sobre a luma recuperada."""
+        fy = min(max(fy, 0.0), height - 1.0)
+        fx = min(max(fx, 0.0), width - 1.0)
+        y0, x0 = int(math.floor(fy)), int(math.floor(fx))
+        y1, x1 = min(y0 + 1, height - 1), min(x0 + 1, width - 1)
+        ty, tx = fy - y0, fx - x0
+        top = _lerp(recovered_at(y0, x0), recovered_at(y0, x1), tx)
+        bottom = _lerp(recovered_at(y1, x0), recovered_at(y1, x1), tx)
+        return _lerp(top, bottom, ty)
+
     local = 0.25 * (
-        recovered_at(min(y + 1, original_img.shape[0] - 1), x)
-        + recovered_at(max(y - 1, 0), x)
-        + recovered_at(y, min(x + 1, original_img.shape[1] - 1))
-        + recovered_at(y, max(x - 1, 0))
+        recovered_sample(y + step_y, x)
+        + recovered_sample(y - step_y, x)
+        + recovered_sample(y, x + step_x)
+        + recovered_sample(y, x - step_x)
     )
     cur = luma(col)
     detail = min(0.055, max(-0.055, cur - local))
@@ -397,3 +415,129 @@ def test_cli_preview_rejects_profile_without_map(tmp_path, capsys) -> None:
     )
     assert code == 1
     assert "--mapa" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Raio do contraste local escalado pela resolução configurada do jogo
+# ---------------------------------------------------------------------------
+def test_parse_game_resolution_variants() -> None:
+    assert preview.parse_game_resolution(None) == preview.DEFAULT_GAME_RESOLUTION
+    assert preview.DEFAULT_GAME_RESOLUTION == (1366, 768)
+    assert preview.parse_game_resolution("1366x768") == (1366, 768)
+    assert preview.parse_game_resolution("1920X1080") == (1920, 1080)
+    assert preview.parse_game_resolution((2560, 1440)) == (2560, 1440)
+    with pytest.raises(preview.PreviewError):
+        preview.parse_game_resolution("1366")
+    with pytest.raises(preview.PreviewError):
+        preview.parse_game_resolution("1366xabc")
+    with pytest.raises(preview.PreviewError):
+        preview.parse_game_resolution((10, 10))
+
+
+def test_local_contrast_step_scales_by_resolution() -> None:
+    step = preview.local_contrast_step((768, 432), (1366, 768), 1.0)
+    assert step == pytest.approx((768 / 1366, 432 / 768))
+    assert preview.local_contrast_step(
+        (1366, 768), (1366, 768), 1.5
+    ) == pytest.approx((1.5, 1.5))
+    assert preview.local_contrast_step((3840, 2160), (1366, 768), 2.0)[0] > 5.0
+
+
+def test_bilinear_sample_matches_roll_for_integer_offsets() -> None:
+    rng = np.random.default_rng(3)
+    image = rng.random((9, 11)).astype(np.float32)
+    np.testing.assert_allclose(preview._bilinear_sample(image, 0, 0), image, atol=1e-6)
+    shifted = preview._bilinear_sample(image, 0, 2)
+    np.testing.assert_allclose(shifted[:, :-2], image[:, 2:], atol=1e-6)
+    np.testing.assert_allclose(shifted[:, -2], image[:, -1], atol=1e-6)  # clamp
+    np.testing.assert_allclose(shifted[:, -1], image[:, -1], atol=1e-6)  # clamp
+    up = preview._bilinear_sample(image, -1, 0)
+    np.testing.assert_allclose(up[1:], image[:-1], atol=1e-6)
+    np.testing.assert_allclose(up[0], image[0], atol=1e-6)  # clamp
+
+
+def test_bilinear_sample_interpolates_fractional_offsets() -> None:
+    ramp = np.tile(np.arange(8, dtype=np.float32)[None, :], (4, 1))
+    sampled = preview._bilinear_sample(ramp, 0.0, 0.5)
+    np.testing.assert_allclose(
+        sampled[0, :6], [0.5, 1.5, 2.5, 3.5, 4.5, 5.5], atol=1e-5
+    )
+
+
+def test_radius_constant_changes_local_contrast() -> None:
+    constants = preview.parse_profile_constants(BUNDLE_SHADER.read_text("utf-8"))
+    atlas = preview.load_atlas_array(BUNDLE_ATLAS)
+    rng = np.random.default_rng(11)
+    pixels = rng.random((40, 60, 3), dtype=np.float32)
+    lut = preview.lut3d_from_atlas(atlas, core.lut_row_for_profile(15))
+    const = dict(constants[15])
+    base = preview.simulate_pixels(15, pixels, lut, const, game_resolution=(1366, 768))
+    wider = dict(const)
+    wider["RADIUS"] = 2.0
+    expanded = preview.simulate_pixels(
+        15, pixels, lut, wider, game_resolution=(1366, 768)
+    )
+    assert np.abs(base - expanded).mean() > 0.001
+
+
+def test_game_resolution_changes_simulated_output() -> None:
+    constants = preview.parse_profile_constants(BUNDLE_SHADER.read_text("utf-8"))
+    atlas = preview.load_atlas_array(BUNDLE_ATLAS)
+    rng = np.random.default_rng(12)
+    pixels = rng.random((72, 128, 3), dtype=np.float32)
+    lut = preview.lut3d_from_atlas(atlas, core.lut_row_for_profile(15))
+    const = constants[15]
+    native = preview.simulate_pixels(
+        15, pixels, lut, const, game_resolution=(1366, 768)
+    )
+    half = preview.simulate_pixels(
+        15, pixels, lut, const, game_resolution=(683, 384)
+    )
+    double = preview.simulate_pixels(
+        15, pixels, lut, const, game_resolution=(2732, 1536)
+    )
+    assert np.abs(native - half).mean() > 0.001
+    assert np.abs(native - double).mean() > 0.0005
+
+
+def test_render_preview_passes_game_resolution() -> None:
+    result = preview.render_preview(
+        15,
+        MAP_HEIGHTS,
+        BUNDLE_ATLAS,
+        BUNDLE_SHADER,
+        max_width=256,
+        game_resolution="1920x1080",
+    )
+    assert result["game_resolution"] == (1920, 1080)
+    with pytest.raises(preview.PreviewError):
+        preview.render_preview(
+            15,
+            MAP_HEIGHTS,
+            BUNDLE_ATLAS,
+            BUNDLE_SHADER,
+            max_width=256,
+            game_resolution="0x0",
+        )
+
+
+def test_cli_preview_accepts_resolucao(tmp_path, capsys) -> None:
+    import multilut_ctl
+
+    output = tmp_path / "preview.png"
+    code = multilut_ctl.main(
+        [
+            "preview",
+            "3",
+            "--shader",
+            str(BUNDLE_SHADER),
+            "--atlas",
+            str(BUNDLE_ATLAS),
+            "--resolucao",
+            "1600x900",
+            "--saida",
+            str(output),
+        ]
+    )
+    assert code == 0
+    assert "1600x900" in capsys.readouterr().out

@@ -185,10 +185,15 @@ instalado; o perfil 0 e bypass real, igual no jogo.
   oficial). Perfis de mapa selecionam a propria foto automaticamente; perfis
   utilitarios/competitivos mantem a ultima escolhida. A escolha fica salva no
   config.json.
+- O campo "Resolucao do jogo" no card (padrao 1366x768, salvo no config.json)
+  informa a resolucao de render configurada no jogo. O raio do contraste local
+  do shader (P_RADIUS, em pixels da resolucao nativa) e escalado por ela na
+  simulacao, com interpolacao bilinear igual ao filtro LINEAR da GPU — o
+  mesmo deslocamento fisico do jogo e reproduzido na previa.
 - A simulacao roda em segundo plano (o perfil atual e trocado sem travar a
-  interface) e o texto abaixo da imagem mostra o tempo gasto. E uma
-  aproximacao: o contraste local usa a escala da previa e o jogo aplica o
-  shader na resolucao nativa, entao pode haver pequena diferenca de nitidez.
+  interface) e o texto abaixo da imagem mostra o tempo gasto e a resolucao
+  usada. Continua sendo uma aproximacao em CPU (sem antialiasing do jogo,
+  texturas ou HDR), mas o contraste local acompanha a resolucao configurada.
 - Sem numpy/Pillow o aplicativo funciona normalmente: o card informa como
   instalar e o item "Simulacao de LUT (Pillow/numpy)" da pagina Sistema fica
   informativo.
@@ -196,6 +201,7 @@ instalado; o perfil 0 e bypass real, igual no jogo.
 
     multilut-ctl preview 6                  # Heights sobre a propria foto
     multilut-ctl preview 14 --mapa sinjar   # Competitivo neutro em Sinjar
+    multilut-ctl preview 3 --resolucao 1920x1080   # raio escalado para 1080p
     multilut-ctl preview 3 -o /tmp/district.png --atlas caminho/atlas.png
 
   O PNG de saida traz "original | simulado" lado a lado.
