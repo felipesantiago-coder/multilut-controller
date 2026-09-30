@@ -13,7 +13,7 @@ try:
     gi.require_version("Adw", "1")
     gi.require_version("Gdk", "4.0")
     gi.require_version("Pango", "1.0")
-    from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
+    from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 except (ImportError, ValueError) as exc:
     print(
         "MultiLUT Controller requer Python 3, PyGObject, GTK 4 e libadwaita.\n"
@@ -127,10 +127,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         self.view_stack = Adw.ViewStack()
         self.view_stack.set_vexpand(True)
-        switcher_title = Adw.ViewSwitcherTitle()
-        switcher_title.set_stack(self.view_stack)
-        switcher_title.set_policy(Adw.ViewSwitcherPolicy.WIDE)
-        header.set_title_widget(switcher_title)
+        switcher = Adw.ViewSwitcher(stack=self.view_stack, policy=Adw.ViewSwitcherPolicy.WIDE)
+        header.set_title_widget(switcher)
 
         self.restore_button = Gtk.Button.new_from_icon_name("edit-undo-symbolic")
         self.restore_button.set_tooltip_text("Restaurar último backup")
@@ -186,18 +184,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         body.append(self.view_stack)
 
-        self.switcher_bar = Adw.ViewSwitcherBar()
-        self.switcher_bar.set_stack(self.view_stack)
-        toolbar.add_bottom_bar(self.switcher_bar)
-        switcher_title.bind_property(
-            "title-visible",
-            self.switcher_bar,
-            "reveal",
-            GObject.BindingFlags.SYNC_CREATE | GObject.BindingFlags.INVERT_BOOLEAN,
-        )
-
         toolbar.set_content(body)
-        self.setup_adaptive_layout()
         self.toast_overlay.set_child(toolbar)
         self.set_content(self.toast_overlay)
 
@@ -251,28 +238,22 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             pass
         return False
 
-    def setup_adaptive_layout(self) -> None:
-        """Em janelas estreitas, empilha as linhas largas (padrão libadwaita)."""
-        if not hasattr(Adw, "Breakpoint") or not hasattr(Adw, "BreakpointCondition"):
-            return
-        try:
-            breakpoint = Adw.Breakpoint.new(
-                Adw.BreakpointCondition.parse("max-width: 820px")
-            )
-        except Exception:
-            return
-        for row in (
-            self.detail_actions,
-            self.scopes_actions,
-            self.target_row,
-            self.preset_row,
-            self.scopes_manual_row,
-        ):
-            try:
-                breakpoint.add_setter(row, "orientation", Gtk.Orientation.VERTICAL)
-            except Exception:
-                return
-        self.add_breakpoint(breakpoint)
+    def _wrap_box(self, spacing: int, homogeneous: bool = False) -> Gtk.Widget:
+        """Linha que empilha os filhos verticalmente quando falta largura.
+
+        Usa Adw.WrapBox (libadwaita >= 1.7) e cai para Gtk.Box em versões
+        antigas — assim a janela nunca depende de APIs instáveis para abrir.
+        """
+        if hasattr(Adw, "WrapBox"):
+            box = Adw.WrapBox()
+            box.set_property("line-homogeneous", homogeneous)
+            box.set_property("child-spacing", spacing)
+            box.set_property("line-spacing", spacing)
+            return box
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=spacing)
+        if homogeneous:
+            box.set_homogeneous(True)
+        return box
 
     def build_sidebar(self) -> Gtk.Widget:
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -412,9 +393,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.install_button.connect("clicked", self.on_install_bundle)
         content.append(self.install_button)
 
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        actions.set_homogeneous(True)
-        self.detail_actions = actions
+        actions = self._wrap_box(10, homogeneous=True)
         self.apply_button = Gtk.Button(label="Aplicar perfil")
         self.apply_button.add_css_class("suggested-action")
         self.apply_button.connect("clicked", self.on_apply)
@@ -498,8 +477,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         install_caption.add_css_class("section-title")
         self.scopes_path_label = Gtk.Label(xalign=0, wrap=True)
         self.scopes_path_label.add_css_class("muted")
-        manual_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.scopes_manual_row = manual_row
+        manual_row = self._wrap_box(8)
         self.scopes_path_entry = Gtk.Entry(placeholder_text="Caminho manual, ex.: ~/.local/share/Steam/steamapps/common/insurgency2/insurgency")
         self.scopes_path_entry.set_hexpand(True)
         use_button = Gtk.Button(label="Usar este caminho")
@@ -523,8 +501,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         settings_inner.set_margin_top(16)
         settings_inner.set_margin_bottom(16)
 
-        target_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        self.target_row = target_row
+        target_row = self._wrap_box(10)
         target_label = Gtk.Label(label="Ampliação máxima", xalign=0)
         target_label.set_size_request(190, -1)
         self.target_value_label = Gtk.Label(xalign=1)
@@ -541,8 +518,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         target_row.append(self.target_value_label)
         settings_inner.append(target_row)
 
-        preset_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        self.preset_row = preset_row
+        preset_row = self._wrap_box(10)
         preset_label = Gtk.Label(label="Opções rápidas", xalign=0)
         preset_label.set_size_request(190, -1)
         preset_row.append(preset_label)
@@ -567,9 +543,13 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         autoexec_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         autoexec_label = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-        autoexec_title = Gtk.Label(label="Ativar sozinho ao iniciar o jogo", xalign=0)
+        autoexec_title = Gtk.Label(
+            label="Ativar sozinho ao iniciar o jogo", xalign=0, wrap=True
+        )
         autoexec_hint = Gtk.Label(
-            label="Grava mp_theater_override no autoexec.cfg do jogo", xalign=0
+            label="Grava mp_theater_override no autoexec.cfg do jogo",
+            xalign=0,
+            wrap=True,
         )
         autoexec_hint.add_css_class("category-label")
         autoexec_label.append(autoexec_title)
@@ -583,13 +563,16 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         launch_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         launch_label = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-        launch_title = Gtk.Label(label="Ativar pela opção de inicialização do Steam", xalign=0)
+        launch_title = Gtk.Label(
+            label="Ativar pela opção de inicialização do Steam", xalign=0, wrap=True
+        )
         launch_hint = Gtk.Label(
             label="Grava +mp_theater_override multilut_zoom nas opções de "
             "inicialização do jogo (requer Steam fechado). Nos modos coop o "
             "playlist do jogo sobrepõe essa opção — a ativação principal é o "
             "listenserver.cfg, feita automaticamente ao Ativar",
             xalign=0,
+            wrap=True,
         )
         launch_hint.add_css_class("category-label")
         launch_label.append(launch_title)
@@ -605,8 +588,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         settings_card.append(settings_inner)
         content.append(settings_card)
 
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        self.scopes_actions = actions
+        actions = self._wrap_box(10)
         self.scopes_apply_button = Gtk.Button(label="Ativar lunetas ampliadas")
         self.scopes_apply_button.add_css_class("suggested-action")
         self.scopes_apply_button.connect("clicked", self.on_scopes_apply)
