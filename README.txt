@@ -95,6 +95,18 @@ COMO USAR
 O modo "Aplicar ao selecionar" grava cada perfil imediatamente no arquivo.
 O botao de desfazer no cabecalho restaura o ultimo backup.
 
+A linha do perfil atualmente aplicado no shader ganha um marcador (seta)
+na propria lista, em perfis de mapa e utilitarios — assim fica claro qual
+esta "no ar" mesmo depois de selecionar outro para aplicar depois.
+
+ATALHOS DE TECLADO
+------------------
+
+- Ctrl+F: volta para a pagina Perfis e foca a busca.
+- Ctrl+Enter: aplica o perfil selecionado (mesma acao do botao).
+- Ctrl+Z: restaura o ultimo backup (mesma acao do botao de desfazer).
+- Setas e Enter navegam e selecionam perfis na lista (nativo do GTK).
+
 TROCA EM TEMPO REAL
 -------------------
 
@@ -114,16 +126,22 @@ AUTOMACAO E INTEGRACAO
 ----------------------
 
 - CLI sem interface: multilut-ctl list, multilut-ctl set <perfil>,
-  multilut-ctl active e multilut-ctl status. O casamento aceita id, nome
-  sem acentos ou slug do mapa (ex.: multilut-ctl set drycanal). A CLI e
-  instalada em $XDG_DATA_HOME/bin/multilut-ctl pelo install.sh e aceita
-  --shader para um arquivo alternativo e --no-history para nao registrar a
-  troca.
+  multilut-ctl next [--anterior], multilut-ctl active, multilut-ctl status,
+  multilut-ctl doctor [--json], multilut-ctl history [--limit N] e
+  multilut-ctl preview/rows/atlas/reindex. O casamento aceita id, nome sem
+  acentos ou slug do mapa (ex.: multilut-ctl set drycanal). "next" cicla o
+  proximo (ou anterior) perfil como o atalho global; "doctor" imprime o
+  mesmo checklist da pagina Sistema (em JSON com --json) e devolve codigo
+  1 quando algo esta em falha — util para scripts e automacao; "history"
+  mostra as ultimas trocas com a origem. A CLI e instalada em
+  $XDG_DATA_HOME/bin/multilut-ctl pelo install.sh e aceita --shader para
+  um arquivo alternativo e --no-history para nao registrar a troca.
 - Historico local: cada troca fica em
-  ~/.local/state/multilut-controller/history.jsonl (com rotacao automatica)
-  e aparece na pagina "Historico" do aplicativo, com a origem da troca
-  (manual, piloto automatico por mapa, inicio do jogo ou CLI) e botao de
-  limpeza.
+  ~/.local/state/multilut-controller/history.jsonl (com rotacao automatica;
+  instalacoes antigas com o arquivo em ~/.config sao migradas na primeira
+  troca) e aparece na pagina "Historico" do aplicativo, com a origem da
+  troca (manual, piloto automatico por mapa, inicio do jogo ou CLI) e botao
+  de limpeza. O mesmo conteúdo sai no terminal com "multilut-ctl history".
 - Notificacao do desktop: quando a troca vem de automacao (CLI, piloto
   automatico, inicio do jogo ou processo externo) o aplicativo mostra um
   aviso discreto. O interruptor "Notificar ao trocar de perfil" desliga isso.
@@ -331,14 +349,16 @@ VALIDACAO
 
 O nucleo foi testado para leitura, alteracao, backup, restauracao, recusa de
 perfil invalido, validacao do shader, ordenacao alfabetica dos perfis, as
-duas secoes da lista, historico, versionamento, bibliotecas Steam, CLI de
-ponta a ponta, cartoes de mapa, opcoes de inicializacao do Steam (leitura e
+duas secoes da lista, historico (incluindo a migracao para XDG_STATE_HOME),
+versionamento, bibliotecas Steam, CLI de ponta a ponta (set/next/history/
+doctor), cartoes de mapa, opcoes de inicializacao do Steam (leitura e
 escrita com backup), diagnostico, backup do aplicativo, piloto automatico por
 mapa (leitura incremental do console, casamento de mapa/perfil, ciclo de
-perfis) e atalho global (ciclo e registro no historico) — 78 testes e 18
-subtestes (tests/test_core.py, tests/test_lote1.py, tests/test_lote2.py e
-tests/test_lote3.py).
+perfis) e atalho global (ciclo e registro no historico) — 151 testes e 18
+subtestes (tests/test_core.py, test_lote1.py, test_lote2.py, test_lote3.py,
+test_lote4.py, test_preview.py, test_atlas.py e test_refine.py).
 A interface foi verificada em GTK real sob Xvfb, incluindo o piloto
-automatico de ponta a ponta (linha de console → troca de perfil) e a falha
-graciosa do atalho global sem portal; o teste visual final no seu ambiente
-GNOME/Wayland continua recomendado.
+automatico de ponta a ponta (linha de console → troca de perfil), a falha
+graciosa do atalho global sem portal, os atalhos de teclado da janela
+(Ctrl+F / Ctrl+Enter / Ctrl+Z) e o marcador do perfil ativo na lista; o
+teste visual final no seu ambiente GNOME/Wayland continua recomendado.
