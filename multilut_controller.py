@@ -597,8 +597,11 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             label="Alterna a cópia LOCAL dos theaters que os servidores baixam "
             "para o seu disco (backup automático .multilut.bak e reversível pelo "
             "Restaurar). Use SOMENTE com autorização dos admins. O efeito é só "
-            "visual: dano e recuo continuam do servidor. Se um servidor "
-            "atualizar o theater dele, clique em Ativar de novo",
+            "visual: dano e recuo continuam do servidor. Servidores com "
+            "checagem de consistência recusam o arquivo alterado e desconectam "
+            "na hora do conectar (“Server is enforcing consistency…”): desligue "
+            "esta opção e clique em Ativar para restaurar os originais. Se um "
+            "servidor atualizar o theater dele, clique em Ativar de novo",
             xalign=0,
             wrap=True,
         )
@@ -851,6 +854,25 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                     server_note = (
                         " Client-side: nada a alterar nos theaters de "
                         "servidor."
+                    )
+        else:
+            # Switch desligado: nenhum theater de servidor pode sobrar com
+            # patch — servidores com checagem de consistência recusam o
+            # arquivo alterado. Volta tudo pelo .multilut.bak.
+            try:
+                restored = scopes.revert_server_patches(self.scopes_game_dir)
+            except (OSError, core.MultiLUTError) as exc:
+                self.toast(
+                    f"Lunetas locais aplicadas, mas não deu para reverter os "
+                    f"theaters de servidor pendentes: {exc}",
+                    8,
+                )
+            else:
+                if restored:
+                    server_note = (
+                        " Client-side desligado: "
+                        f"{restored} theater(s) de servidor restaurado(s) "
+                        "ao original."
                     )
         self._persist_scopes_config()
         self.refresh_scopes_page()
