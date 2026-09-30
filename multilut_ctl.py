@@ -4,8 +4,11 @@
 Uso:
   multilut-ctl list                    Lista os perfis conhecidos
   multilut-ctl set <id|nome|slug>      Aplica um perfil (ex.: set buhriz)
+  multilut-ctl next [--anterior]       Aplica o próximo (ou anterior) perfil
   multilut-ctl active                  Mostra o perfil ativo
   multilut-ctl status                  Estado do shader, do perfil e do jogo
+  multilut-ctl doctor [--json]         Diagnóstico completo (código 1 se falha)
+  multilut-ctl history [--limit N]     Últimas trocas registradas
   multilut-ctl preview <id|nome|slug>  Simula o perfil sobre a foto de um mapa
   multilut-ctl rows                    Lista as linhas do atlas e quem as usa
   multilut-ctl atlas <linha> <arquivo> Substitui a linha do atlas por um .cube
@@ -13,12 +16,13 @@ Uso:
 
 Opções comuns:
   --shader CAMINHO    Shader .fx alternativo (padrão: config ou candidato)
-  --no-history        Não registrar a troca no histórico local
+  --no-history        Não registrar a troca no histórico local (set/next)
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -126,6 +130,68 @@ def cmd_active(args: argparse.Namespace) -> int:
     profile = core.PROFILE_BY_ID[profile_id]
     print(f"{profile.id:02d} — {profile.name} ({shader})")
     return 0
+
+
+def cmd_next(args: argparse.Namespace) -> int:
+    """Aplica o próximo (ou anterior) perfil, ciclando 0..24 — igual ao atalho."""
+    shader = resolve_shader(args.shader)
+    current = core.read_active_profile(shader)
+    target = core.next_profile_id(current, -1 if args.anterior else 1)
+    profile = core.PROFILE_BY_ID[target]
+    previous = core.set_active_profile(shader, profile.id)
+    if previous != profile.id and not args.no_history:
+        core.append_history(
+            {
+                "profile_id": profile.id,
+                "profile_name": profile.name,
+                "origin": "cli",
+                "previous": previous,
+                "shader": str(shader),
+            }
+        )
+    print(f"Perfil ativo {profile.id:02d} — {profile.name} ({shader})")
+    return 0
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    limit = max(1, min(args.limit, 1000))
+    entries = core.read_history(limit=limit)
+    if not entries:
+        print("Histórico vazio.")
+        return 0
+    for entry in entries:
+        ts = str(entry.get("ts") or "?")
+        profile_id = entry.get("profile_id")
+        name = str(entry.get("profile_name") or "?")
+        origin = str(entry.get("origin") or "?")
+        if isinstance(profile_id, int):
+            head = f"{profile_id:02d} — {name}"
+        else:
+            head = f"{profile_id} — {name}"
+        print(f"{ts}  {head}  [{origin}]")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Checklist de diagnóstico completo no terminal (mesma fonte da página Sistema)."""
+    import multilut_extra as extra
+
+    report = extra.diagnostic_report()
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        labels = {"ok": "ok   ", "warn": "aviso", "fail": "FALHA", "info": "info "}
+        for item in report:
+            state = str(item.get("state") or "?")
+            title = str(item.get("title") or "?")
+            detail = str(item.get("detail") or "")
+            print(f"[{labels.get(state, state)}] {title}: {detail}")
+        has_fail = any(item.get("state") == "fail" for item in report)
+        print(
+            "\nDiagnóstico concluído com "
+            + ("FALHAS — revise os itens acima." if has_fail else "nenhuma falha.")
+        )
+    return 1 if any(item.get("state") == "fail" for item in report) else 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -306,6 +372,44 @@ def build_parser() -> argparse.ArgumentParser:
         "active", parents=[common], help="mostra o perfil ativo"
     )
     active_parser.set_defaults(func=cmd_active)
+
+    next_parser = subparsers.add_parser(
+        "next",
+        parents=[common],
+        help="aplica o próximo perfil (ciclo 0 a 24; --anterior volta)",
+    )
+    next_parser.add_argument(
+        "--anterior",
+        action="store_true",
+        help="aplica o perfil anterior em vez do próximo",
+    )
+    next_parser.add_argument(
+        "--no-history", action="store_true", help="não registrar no histórico"
+    )
+    next_parser.set_defaults(func=cmd_next)
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        parents=[common],
+        help="checklist de diagnóstico completo (código 1 quando há falha)",
+    )
+    doctor_parser.add_argument(
+        "--json", action="store_true", help="saída em JSON para automação"
+    )
+    doctor_parser.set_defaults(func=cmd_doctor)
+
+    history_parser = subparsers.add_parser(
+        "history",
+        parents=[common],
+        help="mostra as últimas trocas registradas",
+    )
+    history_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="quantidade de entradas (padrão: 20)",
+    )
+    history_parser.set_defaults(func=cmd_history)
 
     status_parser = subparsers.add_parser(
         "status", parents=[common], help="diagnóstico rápido"
