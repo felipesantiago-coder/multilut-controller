@@ -35,7 +35,7 @@ VDF_SAMPLE = r'''
                                         "730" { "LaunchOptions" "-novid" }
                                         "222880"
                                         {
-                                                "LaunchOptions" "%command% ENABLE_VKBASALT=1"
+                                                "LaunchOptions" "%command% ENABLE_VKBASALT=1 -condebug"
                                                 "LastPlayed" "0"
                                         }
                                         "570" { }
@@ -74,7 +74,7 @@ class HomeSandboxTestCase(unittest.TestCase):
 class LaunchOptionsTests(HomeSandboxTestCase):
     def test_parse_launch_options(self):
         options = extra.parse_launch_options(VDF_SAMPLE)
-        self.assertEqual(options, "%command% ENABLE_VKBASALT=1")
+        self.assertEqual(options, "%command% ENABLE_VKBASALT=1 -condebug")
 
     def test_parse_ignores_other_games(self):
         self.assertIsNone(extra.parse_launch_options(VDF_SAMPLE, "570"))
@@ -91,7 +91,7 @@ class LaunchOptionsTests(HomeSandboxTestCase):
         (target / "localconfig.vdf").write_text(VDF_SAMPLE, encoding="utf-8")
         files = extra.find_localconfig_files()
         self.assertEqual(len(files), 1)
-        self.assertEqual(extra.parse_launch_options(files[0].read_text(encoding="utf-8")), "%command% ENABLE_VKBASALT=1")
+        self.assertEqual(extra.parse_launch_options(files[0].read_text(encoding="utf-8")), "%command% ENABLE_VKBASALT=1 -condebug")
 
     def test_launch_option_report_states(self):
         # sem Steam: info
@@ -137,24 +137,26 @@ class LaunchOptionWriteTests(HomeSandboxTestCase):
     def test_patch_creates_launch_options_key(self):
         # mesmo bloco do app, porém sem a chave LaunchOptions (sobra LastPlayed)
         no_options = VDF_SAMPLE.replace(
-            '"LaunchOptions" "%command% ENABLE_VKBASALT=1"\n', ""
+            '"LaunchOptions" "%command% ENABLE_VKBASALT=1 -condebug"\n', ""
         )
         self.assertNotIn('"LaunchOptions" "%command%', no_options)
         new_text, changed = extra.patch_launch_options_text(no_options)
         self.assertTrue(changed)
         self.assertEqual(
-            extra.parse_launch_options(new_text), "%command% ENABLE_VKBASALT=1"
+            sorted(extra.parse_launch_options(new_text).split()),
+            sorted("%command% ENABLE_VKBASALT=1 -condebug".split()),
         )
         self.assertIn('"LastPlayed"', new_text)
 
     def test_patch_creates_app_block_inside_apps(self):
         empty_apps = VDF_SAMPLE.replace(
             '"730" { "LaunchOptions" "-novid" }', ""
-        ).replace('"LaunchOptions" "%command% ENABLE_VKBASALT=1"', "")
+        ).replace('"LaunchOptions" "%command% ENABLE_VKBASALT=1 -condebug"', "")
         new_text, changed = extra.patch_launch_options_text(empty_apps)
         self.assertTrue(changed)
         self.assertEqual(
-            extra.parse_launch_options(new_text), "%command% ENABLE_VKBASALT=1"
+            sorted(extra.parse_launch_options(new_text).split()),
+            sorted("%command% ENABLE_VKBASALT=1 -condebug".split()),
         )
 
     def test_ensure_end_to_end_with_backup(self):
@@ -171,8 +173,12 @@ class LaunchOptionWriteTests(HomeSandboxTestCase):
         self.assertTrue(backup.is_file())
         self.assertEqual(backup.read_text(encoding="utf-8"), original)
         self.assertEqual(
-            extra.parse_launch_options(vdf_path.read_text(encoding="utf-8")),
-            "%command% ENABLE_VKBASALT=1",
+            sorted(
+                extra.parse_launch_options(
+                    vdf_path.read_text(encoding="utf-8")
+                ).split()
+            ),
+            sorted("%command% ENABLE_VKBASALT=1 -condebug".split()),
         )
         with mock.patch.object(extra, "steam_running", return_value=False):
             again = extra.ensure_launch_options()

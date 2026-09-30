@@ -98,6 +98,7 @@ def parse_launch_options(text: str, app_id: str = core.STEAM_APP_ID) -> str | No
 LAUNCH_OPTION_REQUIREMENTS = {
     "%command%": "executa o jogo com o ambiente do Steam",
     "ENABLE_VKBASALT=1": "ativa a camada vkBasalt no Vulkan",
+    "-condebug": "grava o console.log (usado pelo piloto automático por mapa)",
 }
 
 
