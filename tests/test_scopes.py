@@ -556,3 +556,132 @@ class ExportTheaterTests(unittest.TestCase):
             dest.read_text(encoding="utf-8"),
             scopes.build_theater(10.0, scopes.DEFAULT_OPTICS),
         )
+
+
+def _fake_game_dir(base: Path) -> Path:
+    """Árvore mínima reconhecida como pasta do jogo (2 marcadores)."""
+    game = base / "insurgency"
+    (game / "cfg").mkdir(parents=True, exist_ok=True)
+    (game / "maps").mkdir(parents=True, exist_ok=True)
+    (game / "scripts" / "theaters").mkdir(parents=True, exist_ok=True)
+    return game
+
+
+SERVER_THEATER_WITH_OPTICS = """// theater de servidor (exemplo)
+"#base" "default_coop_shared.theater"
+
+"theater"
+{
+\t"weapon_upgrades"
+\t{
+\t\t"optic_scope_7x"
+\t\t{
+\t\t\t"optics_fov_override"
+\t\t\t{
+\t\t\t\t"fov_wpn_scope"\t\t"10"
+\t\t\t\t"fov_wpn_ironsight"\t"40"
+\t\t\t\t"weapon_mosin"
+\t\t\t\t{
+\t\t\t\t\t"fov_wpn_scope"\t"10"
+\t\t\t\t}
+\t\t\t}
+\t\t}
+\t\t"optic_po4x24"
+\t\t{
+\t\t\t"optics_fov_override"
+\t\t\t{
+\t\t\t\t"fov_wpn_scope"\t\t"17.5"
+\t\t\t}
+\t\t}
+\t}
+}
+"""
+
+SERVER_THEATER_PLAIN = """// mod simples sem ópticas
+"theater"
+{
+\t"teams"
+\t{
+\t\t"team1"\t"1"
+\t}
+}
+"""
+
+
+class ServerPatchTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.game = _fake_game_dir(Path(self._tmp.name))
+        self.theaters = self.game / "scripts" / "theaters"
+        self.with_optics = self.theaters / "brutal_v27.theater"
+        self.with_optics.write_text(SERVER_THEATER_WITH_OPTICS, encoding="utf-8")
+        self.plain = self.theaters / "plain.theater"
+        self.plain.write_text(SERVER_THEATER_PLAIN, encoding="utf-8")
+
+    def test_case_a_replaces_fov_of_selected_optics_only(self):
+        scopes.patch_server_theaters(
+            self.game, 12.0, ["optic_scope_7x"])
+        text = self.with_optics.read_text(encoding="utf-8")
+        self.assertIn('"fov_wpn_scope"\t\t"5.83"', text)
+        self.assertIn('"fov_wpn_scope"\t"5.83"', text)  # sub-bloco weapon_mosin
+        self.assertIn('"fov_wpn_scope"\t\t"17.5"', text)  # po4x24 não selecionada
+        self.assertIn('"fov_wpn_ironsight"\t"40"', text)  # ironsight intocado
+
+    def test_case_b_adds_marked_base_for_missing_optics(self):
+        result = scopes.patch_server_theaters(
+            self.game, 12.0, ["optic_scope_7x", "optic_scope_mk4"])
+        text = self.plain.read_text(encoding="utf-8")
+        self.assertIn('"#base" "multilut_zoom.theater" // multilut-zoom-client', text)
+        self.assertIn(self.plain.name, result["patched"])
+        # a base multilut_zoom.theater precisa existir para o #base resolver
+        self.assertTrue(
+            (self.theaters / "multilut_zoom.theater").is_file())
+
+    def test_backup_created_once_and_revert_restores_bytes(self):
+        scopes.patch_server_theaters(self.game, 12.0, ["optic_scope_7x"])
+        backup = self.with_optics.with_suffix(".theater.multilut.bak")
+        self.assertTrue(backup.is_file())
+        self.assertEqual(
+            backup.read_text(encoding="utf-8"), SERVER_THEATER_WITH_OPTICS)
+        self.assertEqual(scopes.server_patches_present(self.game),
+                         ["brutal_v27.theater", "plain.theater"])
+        restored = scopes.revert_server_patches(self.game)
+        self.assertEqual(restored, 2)
+        self.assertEqual(
+            self.with_optics.read_text(encoding="utf-8"),
+            SERVER_THEATER_WITH_OPTICS)
+        self.assertFalse(backup.exists())
+        self.assertEqual(scopes.server_patches_present(self.game), [])
+
+    def test_idempotent_second_run_changes_nothing(self):
+        scopes.patch_server_theaters(self.game, 12.0, ["optic_scope_7x"])
+        first = self.with_optics.read_text(encoding="utf-8")
+        result = scopes.patch_server_theaters(self.game, 12.0, ["optic_scope_7x"])
+        self.assertEqual(result["patched"], [])
+        self.assertIn(self.with_optics.name, result["unchanged"])
+        self.assertEqual(self.with_optics.read_text(encoding="utf-8"), first)
+
+    def test_reapply_with_new_target_updates_values(self):
+        scopes.patch_server_theaters(self.game, 12.0, ["optic_scope_7x"])
+        scopes.patch_server_theaters(self.game, 5.0, ["optic_scope_7x"])
+        text = self.with_optics.read_text(encoding="utf-8")
+        self.assertIn('"fov_wpn_scope"\t\t"14"', text)
+        self.assertNotIn('"5.83"', text)
+
+    def test_unbalanced_file_is_skipped_not_corrupted(self):
+        broken = self.theaters / "broken.theater"
+        broken.write_text('"theater"\n{\n\t"weapon_upgrades"\n', encoding="utf-8")
+        result = scopes.patch_server_theaters(self.game, 12.0, ["optic_scope_7x"])
+        self.assertTrue(any(
+            item.startswith("broken.theater") for item in result["skipped"]))
+        self.assertEqual(
+            broken.read_text(encoding="utf-8"),
+            '"theater"\n{\n\t"weapon_upgrades"\n')
+
+    def test_own_theater_is_never_patched(self):
+        scopes.patch_server_theaters(self.game, 12.0, ["optic_scope_7x"])
+        source = self.theaters / "multilut_zoom.theater"
+        self.assertEqual(
+            source.read_text(encoding="utf-8"),
+            scopes.build_theater(12.0, ["optic_scope_7x"]))

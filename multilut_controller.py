@@ -585,6 +585,34 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         launch_row.append(launch_label)
         launch_row.append(self.scopes_launch_switch)
         settings_inner.append(launch_row)
+
+        server_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        server_label = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        server_title = Gtk.Label(
+            label="Aplicar também nos theaters de servidores (client-side)",
+            xalign=0,
+            wrap=True,
+        )
+        server_hint = Gtk.Label(
+            label="Alterna a cópia LOCAL dos theaters que os servidores baixam "
+            "para o seu disco (backup automático .multilut.bak e reversível pelo "
+            "Restaurar). Use SOMENTE com autorização dos admins. O efeito é só "
+            "visual: dano e recuo continuam do servidor. Se um servidor "
+            "atualizar o theater dele, clique em Ativar de novo",
+            xalign=0,
+            wrap=True,
+        )
+        server_hint.add_css_class("category-label")
+        server_label.append(server_title)
+        server_label.append(server_hint)
+        server_label.set_hexpand(True)
+        self.scopes_server_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.scopes_server_switch.set_active(
+            bool(self.config["scopes"].get("server_patch", False))
+        )
+        server_row.append(server_label)
+        server_row.append(self.scopes_server_switch)
+        settings_inner.append(server_row)
         settings_card.append(settings_inner)
         content.append(settings_card)
 
@@ -656,6 +684,9 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.config["scopes"]["launch_option"] = bool(
             self.scopes_launch_switch.get_active()
         )
+        self.config["scopes"]["server_patch"] = bool(
+            self.scopes_server_switch.get_active()
+        )
         try:
             core.save_config(self.config)
         except (OSError, core.MultiLUTError) as exc:
@@ -697,6 +728,15 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                 self.scopes_status.remove_css_class("success")
                 self.scopes_status.remove_css_class("warning")
                 self.scopes_status.add_css_class("muted")
+            try:
+                server_patched = scopes.server_patches_present(game_dir)
+            except (OSError, core.MultiLUTError):
+                server_patched = []
+            if server_patched:
+                text += (
+                    f" Client-side em vigor em {len(server_patched)} "
+                    "theater(s) de servidor."
+                )
             self.scopes_status.set_label(text)
         else:
             self.scopes_path_label.set_label(
@@ -782,11 +822,39 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             )
         except (OSError, core.MultiLUTError) as exc:
             launch_warning = f" Opção de inicialização não aplicada: {exc}"
+        server_note = ""
+        if self.scopes_server_switch.get_active():
+            try:
+                patch_result = scopes.patch_server_theaters(
+                    self.scopes_game_dir, target, optics
+                )
+            except (OSError, core.MultiLUTError) as exc:
+                self.toast(
+                    f"Lunetas locais aplicadas, mas o patch client-side "
+                    f"falhou: {exc}",
+                    8,
+                )
+            else:
+                if patch_result["patched"]:
+                    server_note = (
+                        f" Client-side: {len(patch_result['patched'])} "
+                        "theater(s) de servidor alterado(s)."
+                    )
+                elif patch_result["skipped"]:
+                    server_note = (
+                        " Client-side: nenhum theater de servidor alterado "
+                        f"({patch_result['skipped'][0]})."
+                    )
+                else:
+                    server_note = (
+                        " Client-side: nada a alterar nos theaters de "
+                        "servidor."
+                    )
         self._persist_scopes_config()
         self.refresh_scopes_page()
         self.toast(
             f"Lunetas ampliadas para {target:g}x. Vale na próxima partida local: "
-            f"saia da partida atual e comece outra.{launch_warning}",
+            f"saia da partida atual e comece outra.{launch_warning}{server_note}",
             8,
         )
 
@@ -796,14 +864,40 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             return
         try:
             changed = scopes.revert_zoom(self.scopes_game_dir)
-            scopes.set_launch_option(False)
         except (OSError, core.MultiLUTError) as exc:
             self.toast(f"Não foi possível restaurar: {exc}", 8)
             return
+        try:
+            servers_restored = scopes.revert_server_patches(self.scopes_game_dir)
+        except (OSError, core.MultiLUTError) as exc:
+            self.toast(
+                f"Padrão local restaurado, mas os theaters de servidor "
+                f"ficaram pendentes: {exc}",
+                8,
+            )
+            servers_restored = 0
+        try:
+            scopes.set_launch_option(False)
+        except (OSError, core.MultiLUTError) as exc:
+            self.toast(
+                f"Restaurado, mas a opção de inicialização do Steam ficou "
+                f"pendente: {exc}",
+                6,
+            )
         self.refresh_scopes_page()
-        self.toast(
-            "Padrão do jogo restaurado." if changed else "Nada para restaurar."
+        suffix = (
+            f" {servers_restored} theater(s) de servidor devolvido(s) ao "
+            "original."
+            if servers_restored
+            else ""
         )
+        self.toast(
+            "Padrão do jogo restaurado."
+            if changed or servers_restored
+            else "Nada para restaurar.",
+        )
+        if suffix:
+            self.toast(suffix, 6)
 
     def on_scopes_export(self, _button) -> None:
         """Gera o theater das lunetas em um local escolhido (p/ servidores)."""

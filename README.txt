@@ -171,6 +171,32 @@ Sem autorização do admin não use: editar a cópia local do theater do
 servidor configura vantagem indevida sobre os demais jogadores e risco
 de banimento (consistência, BattlEye, regras do servidor).
 
+OVERRIDE CLIENT-SIDE (SOMENTE COM AUTORIZAÇÃO DE TODOS OS ADMINS):
+
+O Insurgency (2014) não tem mais servidores oficiais — se TODOS os
+administradores dos servidores que você frequenta autorizarem, o
+aplicativo pode aplicar a ampliação direto na CÓPIA LOCAL dos theaters
+que o servidor entrega no seu disco (scripts/theaters/*.theater):
+
+- Marque "Aplicar também nos theaters de servidores (client-side)" na
+  aba Lunetas e clique em Ativar. Cada theater local recebe o FOV novo
+  das ópticas selecionadas; para as ópticas que não existem no arquivo,
+  é acrescentada a linha "#base" multilut_zoom.theater marcada com o
+  comentário "multilut-zoom-client". O original de cada arquivo fica em
+  <arquivo>.multilut.bak na primeira alteração.
+- O botão "Restaurar padrão do jogo" também devolve todos os theaters
+  de servidor ao original e apaga os backups.
+- O patch é somente visual (FOV): dano, recuo e equipamentos continuam
+  definidos pelo servidor. Se um servidor atualizar o theater dele, o
+  jogo baixa a versão nova por cima — clique em Ativar de novo para
+  reaplicar a ampliação.
+- Formatos exóticos de theater são recusados com segurança (o arquivo
+  aparece como ignorado no toast e não é modificado).
+- Riscos que ficam por sua conta: servidores com BattlEye ou checagens
+  próprias podem rejeitar arquivos alterados; sem autorização dos
+  admins, o recurso configura vantagem indevida e pode render
+  banimento.
+
 OPÇÕES DE AMPLIAÇÃO:
 
 - Opções rápidas na aba: 3x, 5x, 10x e 12x — um clique ajusta e grava.

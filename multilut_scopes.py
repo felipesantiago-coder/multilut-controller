@@ -117,6 +117,7 @@ def normalize_scope_config(raw: dict | None) -> dict:
         "optics": list(DEFAULT_OPTICS),
         "autoexec": True,
         "launch_option": True,
+        "server_patch": False,
         "game_dir": None,
     }
     if not isinstance(raw, dict):
@@ -135,6 +136,7 @@ def normalize_scope_config(raw: dict | None) -> dict:
             result["optics"] = valid
     result["autoexec"] = bool(raw.get("autoexec", True))
     result["launch_option"] = bool(raw.get("launch_option", True))
+    result["server_patch"] = bool(raw.get("server_patch", False))
     game_dir = raw.get("game_dir")
     if isinstance(game_dir, str) and game_dir.strip():
         result["game_dir"] = game_dir.strip()
@@ -343,6 +345,206 @@ def revert_zoom(game_dir: Path | str) -> bool:
         set_listenserver_zoom(path, False)
         changed = True
     return changed
+
+
+# ---------------------------------------------------------------------------
+# Override client-side em theaters de servidores (com autorização dos admins)
+# ---------------------------------------------------------------------------
+
+SERVER_PATCH_TAG = "multilut-zoom-client"
+_BAK_SUFFIX = ".multilut.bak"
+
+_RE_FOV_SCOPE = re.compile(r'^(\s*"fov_wpn_scope"\s+)"([0-9.]+)"\s*$')
+_RE_THEATER_KEY = re.compile(r'^\s*"?([A-Za-z0-9_.#-]+)"?\s*$')
+_RE_THEATER_LEAF = re.compile(
+    r'^\s*"?([A-Za-z0-9_.#-]+)"?(\s+)"?([A-Za-z0-9_.# -]+)"?\s*$')
+
+
+class _TheaterPatchError(Exception):
+    """Formato não reconhecido — o arquivo é recusado em vez de corrompido."""
+
+
+def _patch_theater_text(text: str, target_mag: float,
+                        optic_ids: list[str] | tuple[str, ...]
+                        ) -> tuple[str, int, set[str]]:
+    """Aplica a ampliação no texto de um theater de servidor.
+
+    Estratégia em duas frentes:
+    - substitui fov_wpn_scope dentro de optics_fov_override das ópticas
+      selecionadas (o valor próprio do arquivo venceria qualquer #base);
+    - se alguma óptica selecionada não existe no arquivo, acrescenta a
+      linha "#base" multilut_zoom.theater (marcada com SERVER_PATCH_TAG)
+      para puxar os FOVs novos — a base é regravada a cada Ativar.
+
+    Devolve (texto_novo, fovs_substituidos, ópticas_encontradas).
+    Levanta _TheaterPatchError se o formato não for reconhecido com
+    segurança (o arquivo é ignorado, nunca corrompido).
+    """
+    selected = {str(item) for item in optic_ids}
+    lines = text.split("\n")
+    out: list[str] = []
+    stack: list[str] = []
+    pending: str | None = None
+    fov_depth: int | None = None
+    fov_optic: str | None = None
+    replaced = 0
+    found: set[str] = set()
+
+    for line in lines:
+        stripped = line.strip()
+        if (not stripped or stripped.startswith("//")
+                or stripped.startswith("/*") or stripped.startswith("*")):
+            out.append(line)
+            continue
+
+        if stripped == "}":
+            if stack:
+                stack.pop()
+            if fov_depth is not None and len(stack) < fov_depth:
+                fov_depth = None
+                fov_optic = None
+            out.append(line)
+            continue
+
+        if stripped.endswith("{"):
+            head = stripped[:-1].strip()
+            key = pending
+            if head:
+                key_match = _RE_THEATER_KEY.match(head)
+                if key_match is None:
+                    raise _TheaterPatchError(f"linha não suportada: {stripped!r}")
+                key = key_match.group(1)
+            stack.append(key or "")
+            pending = None
+            if key == "optics_fov_override":
+                fov_depth = len(stack)
+                fov_optic = stack[-2] if len(stack) >= 2 else None
+            out.append(line)
+            continue
+
+        fov_match = _RE_FOV_SCOPE.match(line)
+        if fov_match is not None:
+            if (fov_depth is not None and len(stack) >= fov_depth
+                    and fov_optic in selected and fov_optic in OPTIC_BY_ID):
+                found.add(fov_optic)
+                optic = OPTIC_BY_ID[fov_optic]
+                new_value = _format_fov(
+                    compute_scope_fov(optic[2], optic[5], target_mag))
+                if new_value != fov_match.group(2):
+                    line = f'{fov_match.group(1)}"{new_value}"'
+                    replaced += 1
+            out.append(line)
+            continue
+
+        leaf = _RE_THEATER_LEAF.match(line)
+        key_line = _RE_THEATER_KEY.match(line)
+        if key_line is not None and leaf is None:
+            pending = key_line.group(1)
+        out.append(line)
+        continue
+
+    if stack:
+        raise _TheaterPatchError("chaves desbalanceadas")
+
+    missing = selected - found
+    if missing and not any(SERVER_PATCH_TAG in ln for ln in out):
+        base_line = f'"#base" "{THEATER_NAME}.theater" // {SERVER_PATCH_TAG}'
+        insert_at = 0
+        for index, existing in enumerate(out):
+            if existing.strip().lower().startswith('"#base"'):
+                insert_at = index + 1
+        out.insert(insert_at, base_line)
+
+    return "\n".join(out), replaced, found
+
+
+def _theaters_dir(game_dir: Path) -> Path:
+    return Path(game_dir) / "scripts" / "theaters"
+
+
+def patch_server_theaters(game_dir: Path | str, target_mag: float,
+                          optic_ids: list[str] | tuple[str, ...]
+                          ) -> dict[str, list[str]]:
+    """Aplica a ampliação nas cópias locais dos theaters baixados de servidores.
+
+    Client-side: altera SOMENTE a cópia no seu disco — o original fica em
+    <arquivo>.multilut.bak na primeira alteração e o servidor continua
+    mandando no conteúdo oficial dele. Use somente com autorização dos
+    administradores; revert_server_patches desfaz tudo. Devolve um mapa
+    com as listas "patched", "unchanged" e "skipped".
+    """
+    path = _validate_game_dir(game_dir)
+    # Valida alvo/ópticas e garante a base (multilut_zoom.theater) atualizada.
+    apply_zoom(path, target_mag, optic_ids)
+    theaters_dir = _theaters_dir(path)
+    result: dict[str, list[str]] = {
+        "patched": [], "unchanged": [], "skipped": []}
+    if not theaters_dir.is_dir():
+        return result
+    source_name = f"{THEATER_NAME}.theater"
+    for theater_file in sorted(theaters_dir.glob("*.theater")):
+        if theater_file.name == source_name:
+            continue
+        try:
+            original = theater_file.read_text(
+                encoding="utf-8", errors="surrogateescape")
+        except OSError as exc:
+            result["skipped"].append(f"{theater_file.name} (leitura: {exc})")
+            continue
+        try:
+            patched, _replaced, _found = _patch_theater_text(
+                original, target_mag, optic_ids)
+        except _TheaterPatchError as exc:
+            result["skipped"].append(f"{theater_file.name} ({exc})")
+            continue
+        if patched == original:
+            result["unchanged"].append(theater_file.name)
+            continue
+        backup = theater_file.with_name(theater_file.name + _BAK_SUFFIX)
+        try:
+            mode = theater_file.stat().st_mode & 0o777
+            if not backup.exists():
+                _atomic_write(backup, original, mode)
+            _atomic_write(theater_file, patched, mode)
+        except OSError as exc:
+            result["skipped"].append(f"{theater_file.name} (gravação: {exc})")
+            continue
+        result["patched"].append(theater_file.name)
+    return result
+
+
+def revert_server_patches(game_dir: Path | str) -> int:
+    """Restaura os theaters de servidor a partir dos backups. Devolve quantos."""
+    path = _validate_game_dir(game_dir)
+    theaters_dir = _theaters_dir(path)
+    if not theaters_dir.is_dir():
+        return 0
+    restored = 0
+    for backup in sorted(theaters_dir.glob("*.theater" + _BAK_SUFFIX)):
+        original = backup.with_name(backup.name[: -len(_BAK_SUFFIX)])
+        try:
+            content = backup.read_text(
+                encoding="utf-8", errors="surrogateescape")
+            mode = backup.stat().st_mode & 0o777
+            _atomic_write(original, content, mode)
+            backup.unlink()
+        except OSError as exc:
+            raise MultiLUTError(
+                f"Não foi possível restaurar {original.name}: {exc}") from exc
+        restored += 1
+    return restored
+
+
+def server_patches_present(game_dir: Path | str) -> list[str]:
+    """Nomes dos theaters de servidor com patch client-side em vigor."""
+    path = _validate_game_dir(game_dir)
+    theaters_dir = _theaters_dir(path)
+    if not theaters_dir.is_dir():
+        return []
+    return sorted(
+        backup.name[: -len(_BAK_SUFFIX)]
+        for backup in theaters_dir.glob("*.theater" + _BAK_SUFFIX)
+    )
 
 
 def autoexec_path(game_dir: Path | str) -> Path:
