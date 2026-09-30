@@ -206,6 +206,37 @@ que o servidor entrega no seu disco (scripts/theaters/*.theater):
   admins, o recurso configura vantagem indevida e pode render
   banimento.
 
+ATENÇÃO — CHECAGEM DE CONSISTÊNCIA (sv_consistency):
+
+Servidores podem exigir que o theater no cliente seja IDÊNTICO ao do
+servidor (checagem de consistência de arquivos do Source). Nesses casos
+a conexão cai na hora, com a mensagem:
+
+  SERVER IS ENFORCING CONSISTENCY FOR THIS FILE
+  scripts/theaters/<nome>.theater
+
+Isso vale MESMO com sv_pure 0: pure e consistency são checagens
+independentes — um servidor "pure 0" ainda pode exigir o theater
+inalterado. Não é defeito do patch: é a proteção anti-alteração do
+servidor fazendo o trabalho dela. O que fazer:
+
+1. Voltar a entrar AGORA: desligue o switch client-side e clique em
+   Ativar de novo — os theaters voltam ao original a partir do
+   .multilut.bak e a ampliação local (partidas próprias) continua
+   valendo. Manual, se preferir:
+   mv <arquivo>.theater.multilut.bak <arquivo>.theater
+2. Teste com liberação do admin: no console/RCON do SERVIDOR,
+   sv_consistency 0 (para voltar depois, sv_consistency 1). Com
+   sv_pure 0 + consistency 0 o patch client-side passa a valer somente
+   no seu jogo — os demais jogadores não são afetados.
+3. Caminho definitivo (sem mexer em consistency): instalar no próprio
+   servidor. Envie ao admin a versão alterada do theater dele
+   (scripts/theaters/<nome>.theater do seu disco) JUNTO do
+   multilut_zoom_fov.theater — o "#base" gravado no patch precisa
+   existir no servidor — e distribua os dois pelo fastdl: todos os
+   clientes baixam o mesmo arquivo, a checagem passa e a ampliação
+   vale para todo mundo.
+
 OPÇÕES DE AMPLIAÇÃO:
 
 - Opções rápidas na aba: 3x, 5x, 10x e 12x — um clique ajusta e grava.
