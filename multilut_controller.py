@@ -127,6 +127,11 @@ list row:selected { background: alpha(@accent_bg_color, 0.18); }
   border-radius: 12px;
   border: 1px solid alpha(currentColor, 0.12);
 }
+.active-flag {
+  min-width: 18px;
+  min-height: 18px;
+  -gtk-icon-shadow: 0 1px 3px alpha(black, 0.85);
+}
 """
 
 
@@ -155,7 +160,18 @@ class ProfileRow(Gtk.ListBoxRow):
         labels.append(title)
         labels.append(category)
         box.append(labels)
+
+        self.active_flag = Gtk.Image.new_from_icon_name("media-playback-start-symbolic")
+        self.active_flag.add_css_class("accent")
+        self.active_flag.add_css_class("active-flag")
+        self.active_flag.set_tooltip_text("Perfil aplicado no shader")
+        self.active_flag.set_valign(Gtk.Align.CENTER)
+        self.active_flag.set_visible(False)
+        box.append(self.active_flag)
         self.set_child(box)
+
+    def set_active_flag(self, active: bool) -> None:
+        self.active_flag.set_visible(active)
 
 
 class SectionHeaderRow(Gtk.ListBoxRow):
@@ -233,6 +249,13 @@ class MapCardRow(Gtk.ListBoxRow):
         title.set_hexpand(True)
         title_box.append(title)
         content.append(title_box)
+        self.active_flag = Gtk.Image.new_from_icon_name("media-playback-start-symbolic")
+        self.active_flag.add_css_class("accent")
+        self.active_flag.add_css_class("active-flag")
+        self.active_flag.set_tooltip_text("Perfil aplicado no shader")
+        self.active_flag.set_valign(Gtk.Align.CENTER)
+        self.active_flag.set_visible(False)
+        content.append(self.active_flag)
         badge = Gtk.Label(label=f"{profile.id:02d}")
         badge.add_css_class("map-card-badge")
         badge.set_valign(Gtk.Align.CENTER)
@@ -241,6 +264,9 @@ class MapCardRow(Gtk.ListBoxRow):
         overlay.add_overlay(content)
 
         self.set_child(overlay)
+
+    def set_active_flag(self, active: bool) -> None:
+        self.active_flag.set_visible(active)
 
 
 class MultiLUTWindow(Adw.ApplicationWindow):
@@ -298,7 +324,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         header.set_title_widget(switcher)
 
         self.restore_button = Gtk.Button.new_from_icon_name("edit-undo-symbolic")
-        self.restore_button.set_tooltip_text("Restaurar último backup")
+        self.restore_button.set_tooltip_text("Restaurar último backup (Ctrl+Z)")
         self.restore_button.connect("clicked", self.on_restore)
         header.pack_end(self.restore_button)
 
@@ -349,6 +375,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         page_profiles = self.view_stack.add_titled(paned, "profiles", "Perfis")
         page_profiles.set_icon_name("view-grid-symbolic")
+        self._page_profiles = page_profiles
         page_atlas = self.view_stack.add_titled(
             self.build_atlas_page(), "atlas", "Atlas"
         )
@@ -367,6 +394,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         toolbar.set_content(body)
         self.toast_overlay.set_child(toolbar)
         self.set_content(self.toast_overlay)
+        self._install_shortcuts()
 
         self.refresh_shader_status(select_active=True)
         self.refresh_game_status()
@@ -456,6 +484,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         sidebar.append(heading)
 
         self.search = Gtk.SearchEntry(placeholder_text="Buscar perfil ou mapa")
+        self.search.set_tooltip_text("Busca por nome, mapa ou número do perfil (Ctrl+F foca)")
         self.search.set_margin_start(12)
         self.search.set_margin_end(12)
         self.search.connect("search-changed", self.on_search_changed)
@@ -471,16 +500,17 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.profile_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.profile_list.set_css_classes(["profiles-list"])
         self.profile_list.connect("row-selected", self.on_profile_selected)
+        self._rows_by_id: dict[int, Gtk.ListBoxRow] = {}
         for section_title, profiles in core.profiles_by_section():
             self.profile_list.append(SectionHeaderRow(section_title))
             for profile in profiles:
                 slug = core.map_image_slug(profile)
                 if slug is not None:
-                    self.profile_list.append(
-                        MapCardRow(profile, MAP_IMAGE_DIR / f"{slug}.jpg")
-                    )
+                    row = MapCardRow(profile, MAP_IMAGE_DIR / f"{slug}.jpg")
                 else:
-                    self.profile_list.append(ProfileRow(profile))
+                    row = ProfileRow(profile)
+                self._rows_by_id[profile.id] = row
+                self.profile_list.append(row)
         self.search_counter.set_label(f"{len(core.PROFILES)} perfis")
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -781,6 +811,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         actions = self._wrap_box(10, homogeneous=True)
         self.apply_button = Gtk.Button(label="Aplicar perfil")
+        self.apply_button.set_tooltip_text("Aplica o perfil selecionado (Ctrl+Enter)")
         self.apply_button.add_css_class("suggested-action")
         self.apply_button.connect("clicked", self.on_apply)
         self.launch_button = Gtk.Button(label="Aplicar e iniciar o jogo")
@@ -2511,6 +2542,69 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                 "atualizar pacote” alinha a base (o perfil atual é preservado)."
             )
 
+    def _install_shortcuts(self) -> None:
+        """Atalhos da janela: Ctrl+F busca, Ctrl+Enter aplica, Ctrl+Z desfaz.
+
+        Navegação por setas na lista e ativação com Enter já são nativas do
+        Gtk.ListBox; aqui ficam só os atalhos globais da janela. Falha
+        silenciosamente em versões de GTK sem Gtk.Shortcut.
+        """
+        if not hasattr(Gtk, "Shortcut"):
+            return
+        specs = (
+            ("<Control>f", self._shortcut_focus_search),
+            ("<Control>Return", self._shortcut_apply),
+            ("<Control>z", self._shortcut_restore),
+        )
+        installed: list[str] = []
+        for trigger, callback in specs:
+            try:
+                shortcut = Gtk.Shortcut()
+                shortcut.set_trigger(Gtk.ShortcutTrigger.parse_string(trigger))
+                shortcut.set_action(Gtk.CallbackAction.new(callback))
+                self.add_shortcut(shortcut)
+                installed.append(trigger)
+            except GLib.Error:
+                continue
+        self._shortcut_triggers = installed
+
+    def _shortcut_focus_search(self, _widget, _args) -> bool:
+        """Ctrl+F: volta para a página Perfis e foca a busca."""
+        page = self._page_profiles
+        # add_titled devolve Adw.ViewStackPage; set_visible_child quer o widget
+        if hasattr(page, "get_child"):
+            page = page.get_child()
+        self.view_stack.set_visible_child(page)
+        self.search.grab_focus()
+        return True
+
+    def _shortcut_apply(self, _widget, _args) -> bool:
+        """Ctrl+Enter: aplica o perfil selecionado (mesma ação do botão)."""
+        if not self.shader_valid:
+            self.toast("Shader inválido — nada para aplicar.", 5)
+            return True
+        self.apply_selected_profile()
+        return True
+
+    def _shortcut_restore(self, _widget, _args) -> bool:
+        """Ctrl+Z: restaura o último backup (mesma ação do botão do cabeçalho)."""
+        if not self.shader_valid:
+            self.toast("Shader inválido — nada para restaurar.", 5)
+            return True
+        if not core.backup_path(self.shader_path).is_file():
+            self.toast("Não há backup para restaurar.", 5)
+            return True
+        self.on_restore(None)
+        return True
+
+    def _update_active_markers(self, active_id: int | None) -> None:
+        """Sincroniza o marcador “aplicado” de cada linha com o shader."""
+        for profile_id, row in self._rows_by_id.items():
+            try:
+                row.set_active_flag(profile_id == active_id)
+            except AttributeError:
+                continue
+
     def refresh_shader_status(self, select_active: bool = False) -> None:
         self.path_label.set_label(str(self.shader_path))
         valid, message = core.validate_shader(self.shader_path)
@@ -2528,7 +2622,9 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             try:
                 active = core.read_active_profile(self.shader_path)
             except core.MultiLUTError:
+                self._update_active_markers(None)
                 return
+            self._update_active_markers(active)
             if (
                 self._shader_was_valid
                 and active != self.selected_profile.id
@@ -2551,6 +2647,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.status_icon.set_from_icon_name("dialog-warning-symbolic")
             self.status_label.set_label("Shader não localizado ou incompatível")
             self._shader_was_valid = False
+            self._update_active_markers(None)
 
     def refresh_game_status(self) -> bool:
         running = core.is_game_running()
