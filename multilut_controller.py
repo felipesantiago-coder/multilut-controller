@@ -15,8 +15,9 @@ try:
     gi.require_version("Gtk", "4.0")
     gi.require_version("Adw", "1")
     gi.require_version("Gdk", "4.0")
+    gi.require_version("GdkPixbuf", "2.0")
     gi.require_version("Pango", "1.0")
-    from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
+    from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango
 except (ImportError, ValueError) as exc:
     print(
         "MultiLUT Controller requer Python 3, PyGObject, GTK 4 e libadwaita.\n"
@@ -265,6 +266,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.shader_valid = False
         self.file_monitor = None
         self._programmatic_selection = False
+        self._atlas_pixbuf = None
+        self._atlas_pixbuf_source = None
         self._game_was_running = None
         self._shader_was_valid = False
         # piloto automático por mapa (console.log)
@@ -296,6 +299,11 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         folder_button.set_tooltip_text("Abrir pasta do shader")
         folder_button.connect("clicked", self.on_open_folder)
         header.pack_end(folder_button)
+
+        about_button = Gtk.Button.new_from_icon_name("help-about-symbolic")
+        about_button.set_tooltip_text("Sobre o aplicativo")
+        about_button.connect("clicked", self.on_about)
+        header.pack_end(about_button)
         toolbar.add_top_bar(header)
 
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -442,6 +450,12 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.search.connect("search-changed", self.on_search_changed)
         sidebar.append(self.search)
 
+        self.search_counter = Gtk.Label(xalign=0)
+        self.search_counter.add_css_class("category-label")
+        self.search_counter.set_margin_start(16)
+        self.search_counter.set_margin_end(16)
+        sidebar.append(self.search_counter)
+
         self.profile_list = Gtk.ListBox()
         self.profile_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.profile_list.set_css_classes(["profiles-list"])
@@ -456,6 +470,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                     )
                 else:
                     self.profile_list.append(ProfileRow(profile))
+        self.search_counter.set_label(f"{len(core.PROFILES)} perfis")
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
@@ -628,7 +643,13 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         choose.set_margin_bottom(4)
         choose.set_margin_end(4)
         choose.connect("clicked", self.on_choose_shader)
+        copy_path = Gtk.Button.new_from_icon_name("edit-copy-symbolic")
+        copy_path.set_tooltip_text("Copiar caminho do shader")
+        copy_path.set_margin_top(4)
+        copy_path.set_margin_bottom(4)
+        copy_path.connect("clicked", self.on_copy_shader_path)
         path_line.append(self.path_label)
+        path_line.append(copy_path)
         path_line.append(choose)
         self.shader_validation = Gtk.Label(xalign=0, wrap=True)
         self.shader_validation.add_css_class("muted")
@@ -638,9 +659,37 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         path_card.append(path_inner)
         content.append(path_card)
 
+        # --- Atlas do perfil (linha da LUT usada pelo shader) --------------
+        atlas_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        atlas_card.add_css_class("card")
+        atlas_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        atlas_inner.set_margin_start(18)
+        atlas_inner.set_margin_end(18)
+        atlas_inner.set_margin_top(14)
+        atlas_inner.set_margin_bottom(14)
+        atlas_title = Gtk.Label(label="Atlas do perfil", xalign=0)
+        atlas_title.add_css_class("section-title")
+        self.atlas_row_label = Gtk.Label(xalign=0)
+        self.atlas_row_label.add_css_class("category-label")
+        self.atlas_picture = Gtk.Picture()
+        self.atlas_picture.set_content_fit(Gtk.ContentFit.FILL)
+        self.atlas_picture.set_size_request(-1, 26)
+        self.atlas_status = Gtk.Label(xalign=0, wrap=True)
+        self.atlas_status.add_css_class("muted")
+        atlas_inner.append(atlas_title)
+        atlas_inner.append(self.atlas_row_label)
+        atlas_inner.append(self.atlas_picture)
+        atlas_inner.append(self.atlas_status)
+        atlas_card.append(atlas_inner)
+        content.append(atlas_card)
+
         self.install_button = Gtk.Button(label="Instalar/atualizar pacote MultiLUT v1.8")
         self.install_button.connect("clicked", self.on_install_bundle)
         content.append(self.install_button)
+
+        self.bundle_check_label = Gtk.Label(xalign=0, wrap=True)
+        self.bundle_check_label.add_css_class("category-label")
+        content.append(self.bundle_check_label)
 
         actions = self._wrap_box(10, homogeneous=True)
         self.apply_button = Gtk.Button(label="Aplicar perfil")
@@ -682,6 +731,83 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.detail_best.set_label(profile.best_for)
         self.detail_tone.set_label(f"Resposta visual: {profile.tone}")
         self._update_detail_photo(profile)
+        self.update_atlas_card(profile)
+
+    # ------------------------------------------------------- atlas v1.8
+    def atlas_source_path(self) -> Path:
+        installed = core.default_texture_path()
+        if installed.is_file():
+            return installed
+        return BUNDLE_DIR / "Textures/MultiLut_Insurgency_Optimized.png"
+
+    def load_atlas_pixbuf(self) -> GdkPixbuf.Pixbuf | None:
+        source = self.atlas_source_path()
+        cached = self._atlas_pixbuf
+        if cached is not None and self._atlas_pixbuf_source == str(source):
+            return cached
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(source))
+        except GLib.Error:
+            self._atlas_pixbuf = None
+            self._atlas_pixbuf_source = None
+            return None
+        self._atlas_pixbuf = pixbuf
+        self._atlas_pixbuf_source = str(source)
+        return pixbuf
+
+    def update_atlas_card(self, profile: core.Profile) -> None:
+        """Mostra a faixa da LUT usada pelo perfil no atlas v1.8."""
+        if not hasattr(self, "atlas_picture"):
+            return
+        row = core.lut_row_for_profile(profile.id)
+        self.atlas_row_label.set_label(
+            f"Perfil {profile.id:02d} · linha {row} do atlas "
+            f"({core.ATLAS_SLICES} fatias x {core.ATLAS_ROWS} linhas)"
+        )
+        pixbuf = self.load_atlas_pixbuf()
+        if pixbuf is None:
+            self.atlas_picture.set_visible(False)
+            self.atlas_status.set_label(
+                "Atlas não localizado — instale o pacote MultiLUT para pré-visualizar."
+            )
+            return
+        valid, message = core.validate_texture(self.atlas_source_path())
+        if not valid:
+            self.atlas_picture.set_visible(False)
+            self.atlas_status.set_label(message)
+            return
+        width = pixbuf.get_width()
+        height = pixbuf.get_height()
+        row_height = max(1, height // core.ATLAS_ROWS)
+        top = min(row * row_height, max(0, height - row_height))
+        strip = pixbuf.new_subpixbuf(0, top, width, row_height)
+        self.atlas_picture.set_paintable(Gdk.Texture.new_for_pixbuf(strip))
+        self.atlas_picture.set_visible(True)
+        self.atlas_status.set_label(message)
+
+    def copy_to_clipboard(self, text: str, confirmation: str) -> None:
+        display = Gdk.Display.get_default()
+        if display is None:
+            self.toast("Não foi possível acessar a área de transferência.")
+            return
+        display.get_clipboard().set_text(text)
+        self.toast(confirmation)
+
+    def on_copy_shader_path(self, _button) -> None:
+        self.copy_to_clipboard(str(self.shader_path), "Caminho do shader copiado.")
+
+    def on_about(self, _button) -> None:
+        about = Adw.AboutWindow(transient_for=self)
+        about.set_application_name("MultiLUT Controller")
+        about.set_application_icon("com.felipesantiago.MultiLUTController")
+        about.set_version(core.APP_VERSION)
+        about.set_developer_name("Felipe Santiago")
+        about.set_website(core.RELEASES_API_URL.replace("/releases/latest", ""))
+        about.set_comments(
+            "Controlador de perfis LUT (vkBasalt) para o Insurgency (2014)."
+        )
+        about.set_license_type(Gtk.License.MIT_X11)
+        about.present()
 
     def _update_detail_photo(self, profile: core.Profile) -> None:
         """Mostra a foto oficial do mapa no painel de detalhes, quando houver."""
@@ -732,6 +858,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         visible: dict[Gtk.ListBoxRow, bool] = {}
         header: Gtk.ListBoxRow | None = None
         section_has_match = False
+        visible_profiles = 0
+        total_profiles = 0
         for row in rows:
             profile = getattr(row, "profile", None)
             if profile is None:  # cabeçalho: fecha a seção anterior
@@ -740,17 +868,28 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                 header = row
                 section_has_match = False
                 continue
+            total_profiles += 1
             haystack = " ".join(
                 (profile.name, profile.category, profile.summary, profile.best_for)
             ).casefold()
             shows = not query or query in haystack
+            if not shows:
+                # Busca pelo número do perfil: "07", "7", "14"...
+                shows = query == f"{profile.id:02d}" or (
+                    query.isdigit() and int(query) == profile.id
+                )
             visible[row] = shows
             if shows:
+                visible_profiles += 1
                 section_has_match = True
         if header is not None:
             visible[header] = section_has_match
         for row, shows in visible.items():
             row.set_visible(shows)
+        if query:
+            self.search_counter.set_label(f"{visible_profiles} de {total_profiles} perfis")
+        else:
+            self.search_counter.set_label(f"{total_profiles} perfis")
 
     def on_auto_changed(self, switch, _param) -> None:
         self.config["auto_apply"] = switch.get_active()
@@ -1636,6 +1775,28 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         except GLib.Error:
             self.toast("Não foi possível abrir a pasta.")
 
+    def refresh_bundle_check(self) -> None:
+        """Compara o shader instalado com o do pacote interno (v1.8)."""
+        if not hasattr(self, "bundle_check_label"):
+            return
+        installed_hash = core.file_hash(self.shader_path)
+        bundle_hash = core.file_hash(
+            BUNDLE_DIR / "Shaders/MultiLUT_Insurgency_Optimized.fx"
+        )
+        if installed_hash is None:
+            self.bundle_check_label.set_label(
+                "Pacote interno v1.8 disponível para instalação."
+            )
+        elif installed_hash == bundle_hash:
+            self.bundle_check_label.set_label(
+                "Shader instalado é idêntico ao pacote interno v1.8."
+            )
+        else:
+            self.bundle_check_label.set_label(
+                "O shader instalado difere do pacote interno v1.8 — “Instalar/"
+                "atualizar pacote” alinha a base (o perfil atual é preservado)."
+            )
+
     def refresh_shader_status(self, select_active: bool = False) -> None:
         self.path_label.set_label(str(self.shader_path))
         valid, message = core.validate_shader(self.shader_path)
@@ -1646,6 +1807,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         # already installed; validation alone cannot identify its package age.
         self.install_button.set_visible(True)
         self.shader_validation.set_label(message)
+        self.refresh_bundle_check()
         if valid:
             self.shader_validation.remove_css_class("warning")
             self.shader_validation.add_css_class("success")

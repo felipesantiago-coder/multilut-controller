@@ -6,8 +6,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import hashlib
 import json
 import os
+import struct
 import re
 import shutil
 import subprocess
@@ -651,3 +653,76 @@ def next_profile_id(current: int, step: int = 1) -> int:
     ids = sorted(PROFILE_BY_ID)
     index = ids.index(current)
     return ids[(index + step) % len(ids)]
+
+
+# --- Atlas v1.8 e utilidades --------------------------------------------------
+#
+# O atlas MultiLut_Insurgency_Optimized.png tem 32 fatias azuis x 17 linhas
+# de LUT, com fatias de 32x32 pixels (1024x544 no total). O shader escolhe a
+# linha pela variável P_LUT_ROW; perfis 0..16 usam a linha igual ao próprio id
+# e os perfis 17..24 reaproveitam a LUT-base mais próxima (mapeamento abaixo,
+# extraído do próprio shader v1.8).
+
+ATLAS_TILE = 32
+ATLAS_SLICES = 32
+ATLAS_ROWS = 17
+ATLAS_SIZE = (ATLAS_SLICES * ATLAS_TILE, ATLAS_ROWS * ATLAS_TILE)  # 1024 x 544
+
+LUT_ROW_BY_PROFILE: dict[int, int] = {
+    17: 3,
+    18: 12,
+    19: 13,
+    20: 5,
+    21: 2,
+    22: 1,
+    23: 3,
+    24: 13,
+}
+
+
+def lut_row_for_profile(profile_id: int) -> int:
+    """Linha do atlas usada pelo perfil (P_LUT_ROW do shader v1.8)."""
+    return LUT_ROW_BY_PROFILE.get(int(profile_id), int(profile_id))
+
+
+def _png_dimensions(path: Path) -> tuple[int, int] | None:
+    try:
+        with open(path, "rb") as stream:
+            header = stream.read(33)
+    except OSError:
+        return None
+    if len(header) < 33 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        return None
+    width, height = struct.unpack(">II", header[16:24])
+    return int(width), int(height)
+
+
+def validate_texture(path: Path | str) -> tuple[bool, str]:
+    """Confere se o atlas tem a geometria esperada do pacote v1.8."""
+    target = Path(path)
+    if not target.is_file():
+        return False, f"Atlas não encontrado: {target}"
+    dims = _png_dimensions(target)
+    if dims is None:
+        return False, "O atlas não é um PNG válido."
+    if dims != ATLAS_SIZE:
+        return False, (
+            f"Atlas com geometria inesperada: {dims[0]}x{dims[1]} "
+            f"(esperado {ATLAS_SIZE[0]}x{ATLAS_SIZE[1]})."
+        )
+    return True, (
+        f"Atlas v1.8 válido ({dims[0]}x{dims[1]}, "
+        f"{ATLAS_SLICES} fatias x {ATLAS_ROWS} linhas)."
+    )
+
+
+def file_hash(path: Path | str, algorithm: str = "sha256") -> str | None:
+    """Hash hexadecimal do arquivo (None se não puder ser lido)."""
+    try:
+        digest = hashlib.new(algorithm)
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(256 * 1024), b""):
+                digest.update(chunk)
+    except (OSError, ValueError):
+        return None
+    return digest.hexdigest()

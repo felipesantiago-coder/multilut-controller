@@ -250,6 +250,22 @@ Shader padrao:
 Atlas padrao:
   ~/.config/vkBasalt/reshade-shaders/Textures/MultiLut_Insurgency_Optimized.png
 
+ATLAS DO PERFIL E DIAGNOSTICO EXTRAS
+------------------------------------
+
+- O painel de detalhes mostra a faixa da LUT usada pelo perfil no atlas
+  v1.8 (32 fatias x 17 linhas) e confere a geometria do PNG.
+- A busca aceita o numero do perfil (ex.: "7" ou "07") e mostra um
+  contador "X de 25 perfis".
+- O caminho do shader pode ser copiado com um clique (botao ao lado do
+  campo, junto de Selecionar...).
+- O rotulo abaixo de "Instalar/atualizar pacote" compara o shader
+  instalado com o pacote interno por hash e avisa quando houver
+  diferenca (o perfil ativo e preservado ao atualizar).
+- A aba Sistema traz a linha "vkBasalt.conf (effects)", que verifica se
+  os efeitos configurados incluem o MultiLUT.
+- O botao de informacao no cabecalho abre a janela Sobre do aplicativo.
+
 VALIDACAO
 ---------
 

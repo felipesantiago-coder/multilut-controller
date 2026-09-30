@@ -287,6 +287,31 @@ def ensure_launch_options(
 
 
 # ------------------------------------------------------------ diagnóstico
+def vkbasalt_config_status(
+    path: Path | None = None,
+) -> tuple[str, str]:
+    """Confere se o vkBasalt.conf existe e inclui o MultiLUT nos efeitos."""
+    target = core.default_vkbasalt_config_path() if path is None else path
+    if not target.is_file():
+        return "info", (
+            "vkBasalt.conf ausente em ~/.config/vkBasalt — crie ao configurar "
+            "o vkBasalt (o app instala o shader e o atlas)."
+        )
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return "fail", f"Não foi possível ler vkBasalt.conf: {exc}"
+    match = re.search(r"^\s*effects\s*=\s*(.+)$", text, re.MULTILINE)
+    effects = [
+        item.strip() for item in match.group(1).split(",") if item.strip()
+    ] if match else []
+    if any("multilut" in effect.casefold() for effect in effects):
+        return "ok", "effects inclui o MultiLUT: " + ", ".join(effects)
+    if effects:
+        return "warn", "effects não inclui o MultiLUT: " + ", ".join(effects)
+    return "warn", "vkBasalt.conf existe, mas não define effects."
+
+
 def vkbasalt_layer_status(
     roots: list[Path] | None = None,
 ) -> tuple[str, str]:
@@ -377,6 +402,9 @@ def diagnostic_report() -> list[dict]:
 
     state, detail = vkbasalt_layer_status()
     items.append({"title": "vkBasalt (camada Vulkan)", "state": state, "detail": detail})
+
+    state, detail = vkbasalt_config_status()
+    items.append({"title": "vkBasalt.conf (effects)", "state": state, "detail": detail})
 
     state, detail = vulkan_runtime_status()
     items.append({"title": "Runtime Vulkan", "state": state, "detail": detail})
