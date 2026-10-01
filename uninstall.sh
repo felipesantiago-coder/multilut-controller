@@ -47,5 +47,13 @@ if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$DATA_ROOT/applications" >/dev/null 2>&1 || true
 fi
 
+# encerra e remove o daemon (serviço de usuário) e a entrada de autostart
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user stop multilut-daemon.service >/dev/null 2>&1 || true
+  systemctl --user disable multilut-daemon.service >/dev/null 2>&1 || true
+fi
+rm -f "$HOME/.config/systemd/user/multilut-daemon.service"
+rm -f "$HOME/.config/autostart/com.felipesantiago.MultiLUTController.desktop"
+
 printf '%s\n' "MultiLUT Controller removido."
 printf '%s\n' "O shader, o atlas e seus backups foram preservados em ~/.config/vkBasalt."

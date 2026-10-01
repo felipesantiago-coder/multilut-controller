@@ -515,6 +515,109 @@ def fetch_latest_release(timeout: float = 6.0) -> dict | None:
     }
 
 
+def app_repo_dir() -> Path:
+    """Diretório do código do aplicativo (raiz do checkout quando via git)."""
+    return Path(__file__).resolve().parent
+
+
+def local_git_head(repo: Path | None = None) -> str | None:
+    """SHA curto do HEAD local; None fora de um checkout git ou sem git."""
+    repo = repo or app_repo_dir()
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=6.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip() or None
+
+
+def git_remote_head(repo: Path | None = None, timeout: float = 10.0) -> str | None:
+    """SHA do main no servidor (git ls-remote); None em qualquer falha.
+
+    Usa o próprio git em vez da API do GitHub: sem limite de requisições e
+    funciona atrás de proxies que já autorizam o remoto configurado.
+    """
+    repo = repo or app_repo_dir()
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "ls-remote", "origin", "refs/heads/main"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    for line in out.stdout.splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.strip() == "refs/heads/main" and sha.strip():
+            return sha.strip()
+    return None
+
+
+def apply_update(repo: Path | None = None, timeout: float = 90.0) -> dict:
+    """Atualiza o aplicativo com `git pull --ff-only`; nunca derruba alterações.
+
+    Retorna {"ok": bool, "message": str, "old_head": str|None, "new_head": str|None}.
+    Instalações sem git (download .zip) recebem instrução manual.
+    """
+    repo = repo or app_repo_dir()
+    old_head = local_git_head(repo)
+    if old_head is None:
+        return {
+            "ok": False,
+            "message": (
+                "Esta instalação não é um checkout git; baixe a versão nova em "
+                "https://github.com/felipesantiago-coder/multilut-controller/releases"
+            ),
+            "old_head": None,
+            "new_head": None,
+        }
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "pull", "--ff-only"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "ok": False,
+            "message": f"git falhou: {exc}",
+            "old_head": old_head,
+            "new_head": old_head,
+        }
+    new_head = local_git_head(repo)
+    if out.returncode != 0:
+        detail = (out.stderr or out.stdout or "").strip().splitlines()
+        return {
+            "ok": False,
+            "message": detail[-1] if detail else "git pull falhou.",
+            "old_head": old_head,
+            "new_head": new_head,
+        }
+    if new_head == old_head:
+        return {
+            "ok": True,
+            "message": "Já está na versão mais recente.",
+            "old_head": old_head,
+            "new_head": new_head,
+        }
+    return {
+        "ok": True,
+        "message": f"Atualizado: {old_head} -> {new_head}. Reinicie o aplicativo.",
+        "old_head": old_head,
+        "new_head": new_head,
+    }
+
+
 # ------------------------------------------------------------ bibliotecas Steam
 VDF_LIBRARY_PATH_PATTERN = re.compile(r'"path"[ \t]*"([^"]+)"')
 

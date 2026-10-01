@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -39,6 +40,7 @@ MAP_IMAGE_DIR = BASE_DIR / "assets" / "maps"
 ORIGIN_LABELS = {
     "manual": "Manual",
     "auto-map": "Piloto automático",
+    "daemon": "Piloto (daemon)",
     "auto-launch": "Início do jogo",
     "cli": "CLI",
     "hotkey": "Atalho global",
@@ -269,6 +271,84 @@ class MapCardRow(Gtk.ListBoxRow):
         self.active_flag.set_visible(active)
 
 
+class MultiLUTHelpWindow(Gtk.Window):
+    """Central de ajuda: atalhos, glossário e solução de problemas (Ctrl+?)."""
+
+    def __init__(self, parent_window):
+        super().__init__(title="Ajuda — MultiLUT Controller")
+        self.set_default_size(760, 560)
+        if parent_window is not None:
+            self.set_transient_for(parent_window)
+        try:
+            self.set_hide_on_close(True)
+        except AttributeError:
+            pass
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        self.stack = Gtk.Stack()
+        switcher = Gtk.StackSwitcher(stack=self.stack)
+        header.set_title_widget(switcher)
+        toolbar.add_top_bar(header)
+        for name, title, builder in (
+            ("shortcuts", "Atalhos", self._shortcuts_page),
+            ("glossary", "Glossário", self._glossary_page),
+            ("trouble", "Problemas comuns", self._trouble_page),
+        ):
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scroller.set_child(builder())
+            self.stack.add_titled(scroller, name, title)
+        toolbar.set_content(self.stack)
+        self.set_content(toolbar)
+
+    def _page_box(self) -> Gtk.Box:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(18)
+        box.set_margin_bottom(18)
+        box.set_margin_start(26)
+        box.set_margin_end(26)
+        return box
+
+    def _entry(self, title: str, detail: str) -> Gtk.Widget:
+        row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        title_label = Gtk.Label(label=title, xalign=0)
+        title_label.set_wrap(True)
+        detail_label = Gtk.Label(label=detail, xalign=0)
+        detail_label.add_css_class("category-label")
+        detail_label.set_wrap(True)
+        row.append(title_label)
+        row.append(detail_label)
+        return row
+
+    def _shortcuts_page(self) -> Gtk.Widget:
+        box = self._page_box()
+        for keys, description in extra.HELP_SHORTCUTS:
+            box.append(self._entry(keys, description))
+        return box
+
+    def _glossary_page(self) -> Gtk.Widget:
+        box = self._page_box()
+        for term, definition in extra.HELP_GLOSSARY:
+            box.append(self._entry(term, definition))
+        return box
+
+    def _trouble_page(self) -> Gtk.Widget:
+        box = self._page_box()
+        for problem, steps in extra.HELP_TROUBLESHOOTING:
+            group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            problem_label = Gtk.Label(label=problem, xalign=0)
+            problem_label.set_wrap(True)
+            group.append(problem_label)
+            for step in steps:
+                step_label = Gtk.Label(label=f"•  {step}", xalign=0)
+                step_label.add_css_class("category-label")
+                step_label.set_wrap(True)
+                step_label.set_margin_start(14)
+                group.append(step_label)
+            box.append(group)
+        return box
+
+
 class MultiLUTWindow(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application):
         super().__init__(application=application)
@@ -308,6 +388,13 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self._console_path = None
         self._console_tail = None
         self._console_debounce_id = None
+        self._daemon_pilot_active = False
+        # central de ajuda e atualizações
+        self._help_window = None
+        self._update_requested = False
+        self._pending_release = None
+        # autostart da sessão (evita recursão do switch)
+        self._autostart_programmatic = False
         # atalho global (portal)
         self._hotkey_bus = None
         self._hotkey_session = None
@@ -337,6 +424,11 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         about_button.set_tooltip_text("Sobre o aplicativo")
         about_button.connect("clicked", self.on_about)
         header.pack_end(about_button)
+
+        help_button = Gtk.Button.new_from_icon_name("dialog-question-symbolic")
+        help_button.set_tooltip_text("Ajuda, glossário e solução de problemas (Ctrl+?)")
+        help_button.connect("clicked", self.on_open_help)
+        header.pack_end(help_button)
         toolbar.add_top_bar(header)
 
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -1655,7 +1747,11 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         core.save_config(self.config)
         if switch.get_active():
             self._ensure_console_monitor()
-            if core.find_console_log() is None:
+            if extra.daemon_running():
+                self.toast(
+                    "Piloto ativo via daemon: a troca funciona com a janela fechada."
+                )
+            elif core.find_console_log() is None:
                 self.toast(
                     "console.log não encontrado; adicione -condebug à opção "
                     "do jogo (a página Sistema corrige isso).",
@@ -1680,6 +1776,11 @@ class MultiLUTWindow(Adw.ApplicationWindow):
     def _ensure_console_monitor(self) -> None:
         if self._console_monitor is not None:
             return
+        if extra.daemon_running():
+            # daemon ativo: ele é quem aplica os mapas; a janela fica observadora
+            self._daemon_pilot_active = True
+            return
+        self._daemon_pilot_active = False
         console = core.find_console_log()
         if console is None:
             return
@@ -2217,14 +2318,50 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         backup_box.append(import_button)
         page.append(backup_box)
 
+        diagnostic_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        diagnostic_title = Gtk.Label(
+            label="Relatório de diagnóstico (doctor + histórico + console.log)", xalign=0
+        )
+        diagnostic_title.set_hexpand(True)
+        diagnostic_title.set_wrap(True)
+        diagnostic_button = Gtk.Button(label="Exportar relatório…")
+        diagnostic_button.set_tooltip_text(
+            "Salva um relatório pronto para colar em uma issue quando algo falhar"
+        )
+        diagnostic_button.connect("clicked", self.on_export_diagnostic)
+        diagnostic_box.append(diagnostic_title)
+        diagnostic_box.append(diagnostic_button)
+        page.append(diagnostic_box)
+
+        autostart_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        autostart_title = Gtk.Label(
+            label="Iniciar com a sessão (janela oculta; piloto pronto para o jogo)",
+            xalign=0,
+        )
+        autostart_title.set_hexpand(True)
+        autostart_title.set_wrap(True)
+        self.autostart_switch = Gtk.Switch()
+        self.autostart_switch.set_active(extra.autostart_installed())
+        self.autostart_switch.connect("state-set", self.on_autostart_changed)
+        autostart_box.append(autostart_title)
+        autostart_box.append(self.autostart_switch)
+        page.append(autostart_box)
+
         update_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self.update_label = Gtk.Label(
             label=f"MultiLUT Controller v{core.APP_VERSION}", xalign=0
         )
         self.update_label.set_hexpand(True)
+        self.update_apply_button = Gtk.Button(label="Atualizar agora")
+        self.update_apply_button.set_tooltip_text(
+            "Atualiza o aplicativo via git e oferece reiniciar"
+        )
+        self.update_apply_button.set_visible(False)
+        self.update_apply_button.connect("clicked", self.on_update_apply_clicked)
         update_button = Gtk.Button(label="Verificar atualizações agora")
         update_button.connect("clicked", self.on_check_updates_clicked)
         update_box.append(self.update_label)
+        update_box.append(self.update_apply_button)
         update_box.append(update_button)
         page.append(update_box)
 
@@ -2343,7 +2480,58 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.refresh_system_page()
         self.toast("Diagnóstico atualizado.")
 
+    # ------------------------------------------------------------ autostart e relatório
+    def on_autostart_changed(self, switch, state: bool) -> bool:
+        """Liga/desliga o início com a sessão (XDG autostart, janela oculta)."""
+        if self._autostart_programmatic:
+            return False
+        if state:
+            try:
+                extra.autostart_install(minimized=True)
+            except OSError as exc:
+                self.toast(f"Não foi possível ativar o autostart: {exc}", 6)
+                self._autostart_programmatic = True
+                switch.set_active(False)
+                self._autostart_programmatic = False
+                return True
+            message = "O aplicativo iniciará com a sessão, com a janela oculta."
+        else:
+            extra.autostart_remove()
+            message = "Autostart desativado."
+        self.config["autostart_minimized"] = state
+        core.save_config(self.config)
+        self.toast(message)
+        return False
+
+    def on_export_diagnostic(self, _button) -> None:
+        chooser = Gtk.FileChooserNative(
+            title="Exportar relatório de diagnóstico",
+            transient_for=self,
+            action=Gtk.FileChooserAction.SAVE,
+            accept_label="Exportar",
+        )
+        stamp = datetime.now().strftime("%Y%m%d-%H%M")
+        chooser.set_current_name(f"multilut-diagnostico-{stamp}.txt")
+        chooser.connect("response", self.on_export_diagnostic_chosen)
+        chooser.show()
+
+    def on_export_diagnostic_chosen(self, chooser, response) -> None:
+        if response != Gtk.ResponseType.ACCEPT:
+            return
+        chosen = chooser.get_file()
+        if chosen is None or chosen.get_path() is None:
+            self.toast("Selecione um destino válido.")
+            return
+        try:
+            summary = extra.export_diagnostic_report(Path(chosen.get_path()))
+        except (OSError, core.MultiLUTError) as exc:
+            self.toast(f"Export do diagnóstico falhou: {exc}", 6)
+            return
+        kind = "ZIP com config e histórico" if summary["zip"] else "texto"
+        self.toast(f"Relatório ({kind}) salvo em {summary['path']}", 6)
+
     def on_check_updates_clicked(self, _button) -> None:
+        self._update_requested = True
         self.toast("Procurando atualização…")
         threading.Thread(target=self._updates_thread, daemon=True).start()
 
@@ -2447,13 +2635,105 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             GLib.idle_add(self._announce_update, release)
 
     def _announce_update(self, release: dict) -> bool:
-        if core.compare_versions(release["tag"], core.APP_VERSION):
-            self.toast(
-                f"Atualização disponível: {release['tag']} "
-                f"(instalada v{core.APP_VERSION})",
-                8,
-            )
+        if not core.compare_versions(release["tag"], core.APP_VERSION):
+            if self._update_requested:
+                self.toast(f"Você já está na versão mais recente (v{core.APP_VERSION}).")
+            return GLib.SOURCE_REMOVE
+        self._pending_release = release
+        self.update_label.set_label(
+            f"MultiLUT Controller v{core.APP_VERSION} — {release['tag']} disponível"
+        )
+        if hasattr(self, "update_apply_button"):
+            self.update_apply_button.set_visible(True)
+        self.toast(f"Atualização disponível: {release['tag']}", 8)
+        self.show_update_dialog(release)
         return GLib.SOURCE_REMOVE
+
+    # ------------------------------------------------------------ aplicação da atualização
+    def show_update_dialog(self, release: dict) -> None:
+        """Diálogo com botão de atualização direta (git) e link para o GitHub."""
+        if not hasattr(Adw, "MessageDialog"):
+            return
+        notes = str(release.get("name") or "").strip()
+        body = (
+            f"Versão instalada: v{core.APP_VERSION}.\n"
+            + (f"{notes}\n\n" if notes and notes != release["tag"] else "\n")
+            + "A atualização usa git (pull sem forçar) e o app oferece reiniciar."
+        )
+        dialog = Adw.MessageDialog.new(self, f"Atualização {release['tag']} disponível", body)
+        dialog.add_response("later", "Depois")
+        if release.get("url"):
+            dialog.add_response("site", "Ver no GitHub")
+        dialog.add_response("apply", "Atualizar agora")
+        dialog.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect("response", self.on_update_dialog_response, release)
+        dialog.present()
+
+    def on_update_dialog_response(self, dialog, response: str, release: dict) -> None:
+        if response == "apply":
+            self._start_update_apply()
+        elif response == "site" and release.get("url"):
+            Gio.AppInfo.launch_default_for_uri(release["url"], None)
+
+    def on_update_apply_clicked(self, _button) -> None:
+        self._start_update_apply()
+
+    def _start_update_apply(self) -> None:
+        if hasattr(self, "update_apply_button"):
+            self.update_apply_button.set_sensitive(False)
+        self.toast("Atualizando via git…")
+        threading.Thread(target=self._update_apply_thread, daemon=True).start()
+
+    def _update_apply_thread(self) -> None:
+        result = core.apply_update()
+        GLib.idle_add(self._update_apply_done, result)
+
+    def _update_apply_done(self, result: dict) -> bool:
+        if hasattr(self, "update_apply_button"):
+            self.update_apply_button.set_sensitive(True)
+        if not result.get("ok"):
+            self.toast(f"Atualização falhou: {result.get('message', '?')}", 8)
+            return GLib.SOURCE_REMOVE
+        if result.get("new_head") == result.get("old_head"):
+            self.toast("O código já estava na versão mais recente.", 6)
+            return GLib.SOURCE_REMOVE
+        self.update_label.set_label(
+            f"MultiLUT Controller v{core.APP_VERSION} — atualizado ({result['new_head']})"
+        )
+        self._confirm_restart()
+        return GLib.SOURCE_REMOVE
+
+    def _confirm_restart(self) -> None:
+        if not hasattr(Adw, "MessageDialog"):
+            self.toast("Reinicie o aplicativo para concluir a atualização.", 8)
+            return
+        dialog = Adw.MessageDialog.new(
+            self,
+            "Atualização aplicada",
+            "O código novo já está no disco. Reiniciar o aplicativo agora?",
+        )
+        dialog.add_response("close", "Depois")
+        dialog.add_response("restart", "Reiniciar agora")
+        dialog.set_response_appearance("restart", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect("response", self.on_restart_dialog_response)
+        dialog.present()
+
+    def on_restart_dialog_response(self, _dialog, response: str) -> None:
+        if response == "restart":
+            self.restart_application()
+
+    def restart_application(self) -> None:
+        """Relança o aplicativo com os mesmos argumentos e encerra este processo."""
+        try:
+            script = Path(sys.argv[0]).resolve()
+            argv = [sys.executable, str(script), *sys.argv[1:]]
+            subprocess.Popen(argv, start_new_session=True)
+        except OSError:
+            self.toast("Não foi possível reiniciar; abra o aplicativo manualmente.", 6)
+            return
+        application = self.get_application()
+        if application is not None:
+            application.quit()
 
     def on_apply(self, _button) -> None:
         self.apply_selected_profile()
@@ -2593,6 +2873,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             ("<Control>f", self._shortcut_focus_search),
             ("<Control>Return", self._shortcut_apply),
             ("<Control>z", self._shortcut_restore),
+            ("<Control>question", self._shortcut_help),
+            ("F1", self._shortcut_help),
         )
         installed: list[str] = []
         for trigger, callback in specs:
@@ -2634,6 +2916,17 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             return True
         self.on_restore(None)
         return True
+
+    def _shortcut_help(self, _widget, _args) -> bool:
+        """Ctrl+? / F1: abre a central de ajuda."""
+        self.on_open_help()
+        return True
+
+    def on_open_help(self, _button=None) -> None:
+        """Central de ajuda com atalhos, glossário e problemas comuns."""
+        if self._help_window is None:
+            self._help_window = MultiLUTHelpWindow(self)
+        self._help_window.present()
 
     def _update_active_markers(self, active_id: int | None) -> None:
         """Sincroniza o marcador “aplicado” de cada linha com o shader."""
@@ -2750,18 +3043,24 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
 
 class MultiLUTApplication(Adw.Application):
-    def __init__(self):
+    def __init__(self, start_minimized: bool = False):
         super().__init__(application_id=core.APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        self.start_minimized = start_minimized
         self.connect("activate", self.on_activate)
 
     def on_activate(self, app) -> None:
         window = self.props.active_window
         if window is None:
             window = MultiLUTWindow(app)
+            if self.start_minimized:
+                # autostart com --minimized: janela pronta e piloto armado,
+                # porém oculta; abrir o app de novo (nova ativação) apresenta.
+                return
         window.present()
 
 
 def main() -> int:
+    start_minimized = "--minimized" in sys.argv
     Adw.init()
     provider = Gtk.CssProvider()
     provider.load_from_data(CSS)
@@ -2770,7 +3069,7 @@ def main() -> int:
         Gtk.StyleContext.add_provider_for_display(
             display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
-    return MultiLUTApplication().run(sys.argv)
+    return MultiLUTApplication(start_minimized=start_minimized).run(sys.argv)
 
 
 if __name__ == "__main__":

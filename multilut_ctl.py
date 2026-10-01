@@ -7,12 +7,18 @@ Uso:
   multilut-ctl next [--anterior]       Aplica o próximo (ou anterior) perfil
   multilut-ctl active                  Mostra o perfil ativo
   multilut-ctl status                  Estado do shader, do perfil e do jogo
-  multilut-ctl doctor [--json]         Diagnóstico completo (código 1 se falha)
+  multilut-ctl doctor [--json] [--export CAMINHO]
+                                       Diagnóstico completo (código 1 se falha);
+                                       exportável em .txt ou .zip
   multilut-ctl history [--limit N]     Últimas trocas registradas
   multilut-ctl preview <id|nome|slug>  Simula o perfil sobre a foto de um mapa
   multilut-ctl rows                    Lista as linhas do atlas e quem as usa
   multilut-ctl atlas <linha> <arquivo> Substitui a linha do atlas por um .cube
   multilut-ctl reindex <perfil> <linha>  Aponta o perfil para outra linha
+  multilut-ctl daemon status|start|stop|install|uninstall
+                                       Piloto automático como serviço sem janela
+  multilut-ctl autostart on|off|status Inicia o app com a sessão (janela oculta)
+  multilut-ctl update check|apply      Verifica/aplica atualização via git
 
 Opções comuns:
   --shader CAMINHO    Shader .fx alternativo (padrão: config ou candidato)
@@ -191,7 +197,124 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "\nDiagnóstico concluído com "
             + ("FALHAS — revise os itens acima." if has_fail else "nenhuma falha.")
         )
+    if args.export:
+        try:
+            summary = extra.export_diagnostic_report(Path(args.export).expanduser())
+        except OSError as exc:
+            print(f"Erro ao exportar o relatório: {exc}", file=sys.stderr)
+            return 2
+        kind = "zip" if summary["zip"] else "texto"
+        print(f"Relatório de diagnóstico ({kind}) salvo em: {summary['path']}")
     return 1 if any(item.get("state") == "fail" for item in report) else 0
+
+
+def cmd_daemon(args: argparse.Namespace) -> int:
+    """Controla o piloto automático como serviço de usuário (sem janela)."""
+    import multilut_extra as extra
+
+    action = args.acao
+    if action == "status":
+        status = extra.daemon_status()
+        alive = bool(status.get("alive"))
+        print(f"daemon: {'ativo' if alive else 'parado'}")
+        for key in (
+            "pid",
+            "started_at",
+            "auto_map_switch",
+            "console_log",
+            "events",
+        ):
+            if status.get(key) is not None:
+                print(f"{key}: {status[key]}")
+        last = status.get("last_map")
+        if isinstance(last, dict) and last.get("token"):
+            print(
+                f"last_map: {last.get('token')} -> "
+                f"{last.get('profile_id')} — {last.get('profile_name')} ({last.get('ts')})"
+            )
+        if not alive and extra.daemon_unit_installed():
+            print("serviço: instalado; inicie com multilut-ctl daemon start")
+        elif not alive:
+            print("serviço: não instalado (multilut-ctl daemon install)")
+        return 0 if alive else 1
+    if action == "start":
+        ok, message = extra.daemon_start()
+        print(message)
+        return 0 if ok else 1
+    if action == "stop":
+        ok, message = extra.daemon_stop()
+        print(message)
+        return 0 if ok else 1
+    if action == "install":
+        unit = extra.daemon_install_unit()
+        print(f"Serviço instalado: {unit}")
+        ok, message = extra.daemon_start()
+        print(message)
+        return 0 if ok else 1
+    if action == "uninstall":
+        if extra.daemon_uninstall_unit():
+            print("Serviço removido e daemon parado.")
+        else:
+            print("O serviço não estava instalado.")
+        return 0
+    raise core.MultiLUTError(f"Ação de daemon desconhecida: {action!r}")
+
+
+def cmd_autostart(args: argparse.Namespace) -> int:
+    """Inicia o aplicativo com a sessão (XDG autostart, janela oculta)."""
+    import multilut_extra as extra
+
+    action = args.acao
+    if action == "status":
+        if extra.autostart_installed():
+            print(f"autostart: ativado ({extra.autostart_path()})")
+        else:
+            print("autostart: desativado; ligue com multilut-ctl autostart on")
+        return 0
+    if action == "on":
+        target = extra.autostart_install(minimized=True)
+        config = core.load_config()
+        config["autostart_minimized"] = True
+        core.save_config(config)
+        print(f"Autostart ativado: {target} (inicia oculto; use autostart off para desligar)")
+        return 0
+    if action == "off":
+        removed = extra.autostart_remove()
+        config = core.load_config()
+        config["autostart_minimized"] = False
+        core.save_config(config)
+        print("Autostart desativado." if removed else "Autostart já estava desativado.")
+        return 0
+    raise core.MultiLUTError(f"Ação de autostart desconhecida: {action!r}")
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """Verifica ou aplica a atualização do aplicativo (instalação via git)."""
+    if args.acao == "check":
+        local = core.local_git_head() or "sem git"
+        print(f"versão instalada: v{core.APP_VERSION} ({local})")
+        release = core.fetch_latest_release()
+        if release is None:
+            remote = core.git_remote_head()
+            if remote is None:
+                print("Não foi possível consultar o GitHub agora.")
+                return 2
+            print("Sem release publicada; comparando commit do main...")
+            print(f"main remoto: {remote[:7]}")
+            if core.local_git_head() and remote.startswith(core.local_git_head()):
+                print("Você já está no main mais recente.")
+            else:
+                print("Há commits novos no main; use multilut-ctl update apply.")
+            return 0
+        if core.compare_versions(release["tag"], core.APP_VERSION):
+            print(f"Atualização disponível: {release['tag']} — {release['url']}")
+            print("Aplique com multilut-ctl update apply.")
+            return 1
+        print("Você já está na versão mais recente.")
+        return 0
+    result = core.apply_update()
+    print(result["message"])
+    return 0 if result["ok"] else 1
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -396,6 +519,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument(
         "--json", action="store_true", help="saída em JSON para automação"
     )
+    doctor_parser.add_argument(
+        "--export",
+        metavar="CAMINHO",
+        help="salva o relatório completo (.txt) ou pacote (.zip) para uma issue",
+    )
     doctor_parser.set_defaults(func=cmd_doctor)
 
     history_parser = subparsers.add_parser(
@@ -469,6 +597,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--reset", action="store_true", help="restaura o mapeamento padrão v1.8"
     )
     reindex_parser.set_defaults(func=cmd_reindex)
+
+    daemon_parser = subparsers.add_parser(
+        "daemon",
+        parents=[common],
+        help="piloto automático como serviço de usuário (sem janela)",
+    )
+    daemon_parser.add_argument(
+        "acao",
+        choices=("status", "start", "stop", "install", "uninstall"),
+        help="status | start | stop | install (serviço systemd) | uninstall",
+    )
+    daemon_parser.set_defaults(func=cmd_daemon)
+
+    autostart_parser = subparsers.add_parser(
+        "autostart",
+        parents=[common],
+        help="inicia o app com a sessão (janela oculta)",
+    )
+    autostart_parser.add_argument(
+        "acao", choices=("on", "off", "status"), help="liga, desliga ou mostra"
+    )
+    autostart_parser.set_defaults(func=cmd_autostart)
+
+    update_parser = subparsers.add_parser(
+        "update",
+        parents=[common],
+        help="verifica ou aplica atualização do aplicativo via git",
+    )
+    update_parser.add_argument(
+        "acao", choices=("check", "apply"), help="check consulta; apply atualiza"
+    )
+    update_parser.set_defaults(func=cmd_update)
     return parser
 
 

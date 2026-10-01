@@ -152,10 +152,25 @@ AUTOMACAO E INTEGRACAO
   "multilut-ctl set") sao percebidas pelo aplicativo via monitor de arquivo.
 - Piloto automatico por mapa: com o interruptor ligado, o aplicativo acompanha
   o console.log do jogo (o monitor e rearmado quando o jogo recria o arquivo)
-  e, ao detectar o mapa carregado (ex.: 'Loading map "sinjar"'), aplica
-  automaticamente o perfil daquele mapa. Requer -condebug na opcao de
-  inicializacao (a pagina Sistema diagnostica e corrige isso). A troca entra
-  no historico com a origem "Piloto automatico".
+  e, ao detectar o mapa carregado, aplica automaticamente o perfil daquele
+  mapa. O parser reconhece 'Loading map "sinjar"', 'Host_NewGame on map x',
+  'Mapchange to x', 'Host_Changelevel' e o banner do proprio cliente com
+  -condebug (a linha 'Map: <mapa>' do cabecalho com Build/Server Number).
+  Requer -condebug na opcao de inicializacao (a pagina Sistema diagnostica e
+  corrige isso). A troca entra no historico com a origem "Piloto automatico".
+- Daemon do piloto (sem janela): o mesmo piloto pode rodar como servico de
+  usuario do systemd, trocando o perfil pelo mapa mesmo com a interface
+  fechada. Instale/inicie com "multilut-ctl daemon install" (ou "daemon
+  start"/"daemon stop"/"daemon status"); a CLI fala com o daemon por um
+  socket UNIX local (JSON) e o estado tambem fica em
+  ~/.local/state/multilut-controller/daemon.json. Enquanto o daemon estiver
+  ativo, a janela fica em modo observador (sem troca duplicada) e a troca
+  entra no historico com a origem "Piloto (daemon)".
+- Autostart na sessao: o interruptor na pagina Sistema (ou "multilut-ctl
+  autostart on/off") instala a entrada XDG em ~/.config/autostart; o
+  aplicativo inicia com a sessao com a janela oculta (--minimized) e o
+  piloto ja armado antes de voce abrir o jogo. Abrir o aplicativo de novo
+  apresenta a janela normalmente.
 - Atalho global de proximo perfil: registra um atalho do GNOME pelo portal
   org.freedesktop.portal.GlobalShortcuts (GNOME 46+). Ao ligar o interruptor,
   o GNOME abre o dialogo para confirmar/alterar a combinacao sugerida
@@ -164,8 +179,22 @@ AUTOMACAO E INTEGRACAO
   "Atalho global". Sem portal na sessao (ou recusa), o interruptor volta para
   desligado com um aviso — nada quebra.
 - Verificador de atualizacoes: o aplicativo consulta a release mais recente
-  no GitHub em segundo plano e avisa com um toast quando existe versao nova;
-  a pagina Sistema tem o botao "Verificar atualizacoes agora".
+  no GitHub em segundo plano e avisa quando existe versao nova; a pagina
+  Sistema tem o botao "Verificar atualizacoes agora" e, quando ha novidade,
+  o botao "Atualizar agora" abre um dialogo que aplica a atualizacao via
+  "git pull --ff-only" (nunca forcado; instalacoes sem git recebem o link
+  para download) e oferece reiniciar o aplicativo. Pela CLI:
+  "multilut-ctl update check" e "multilut-ctl update apply".
+- Relatorio de diagnostico exportavel: na pagina Sistema, "Exportar
+  relatorio..." gera um .txt (ou .zip com config e historico) com versoes,
+  ambiente, checklist completo do doctor, configuracao relevante, ultimas
+  trocas do historico e o final do console.log do jogo — pronto para colar
+  em uma issue. Pela CLI: "multilut-ctl doctor --export relatorio.txt".
+- Central de ajuda: Ctrl+? (ou F1, ou o botao ? no cabecalho) abre a central
+  com tres paginas: atalhos da janela e do sistema, glossario (condebug,
+  vkBasalt, atlas, piloto, daemon...) e solucao de problemas comuns
+  (piloto nao troca, console.log ausente, shader invalido, atlas errado,
+  simulacao indisponivel).
 
 PAGINA SISTEMA
 --------------
@@ -174,8 +203,9 @@ A pagina "Sistema" concentra o diagnostico e a manutencao:
 
 - Checklist de diagnostico: shader MultiLUT, camada Vulkan do vkBasalt,
   runtime Vulkan, opcao de inicializacao do Steam, console.log do jogo,
-  dependencias opcionais de simulacao (Pillow/numpy) e instalacoes do jogo
-  encontradas. O botao "Reverificar" refaz a checagem.
+  piloto automatico por mapa, daemon do piloto (sem janela), dependencias
+  opcionais de simulacao (Pillow/numpy) e instalacoes do jogo encontradas.
+  O botao "Reverificar" refaz a checagem.
 - Opcao de inicializacao: se o jogo estiver sem "%command%" ou sem
   "ENABLE_VKBASALT=1" nas propriedades do Steam, o item aparece em amarelo
   com o botao "Corrigir". A correcao acrescenta apenas o que falta, exige o
@@ -186,6 +216,9 @@ A pagina "Sistema" concentra o diagnostico e a manutencao:
 - Backup do aplicativo: "Exportar..." empacota config.json e history.jsonl
   em um .zip portatil; "Importar..." restaura o backup. Caminhos de maquina
   vindos do arquivo so sao mantidos se existirem neste sistema.
+- Autostart: interruptor "Iniciar com a sessao" (detalhado acima).
+- Atualizacoes: rotulo da versao + "Atualizar agora" quando existe novidade
+  (detalhado acima).
 
 SIMULACAO DE LUT (OPCIONAL)
 ---------------------------

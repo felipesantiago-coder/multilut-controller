@@ -9,10 +9,16 @@ aplicativo (exportar/importar configuração completa).
 from __future__ import annotations
 
 import json
+import os
+import platform
 import re
 import shutil
+import socket
+import subprocess
+import tempfile
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import multilut_core as core
@@ -389,6 +395,13 @@ def auto_map_pilot_status() -> tuple[str, str]:
     """Estado do piloto automático por mapa (troca de LUT via console.log)."""
     if not bool(core.load_config().get("auto_map_switch", False)):
         return "info", "Desligado; ligue a opção na aba Perfis para trocar o LUT pelo mapa."
+    daemon = query_daemon()
+    if daemon is not None:
+        last = daemon.get("last_map") or {}
+        detail = "gerenciado pelo daemon (funciona sem a janela aberta)"
+        if last.get("profile_name"):
+            detail += f"; último mapa: {last.get('token', '?')} -> {last['profile_name']}"
+        return "ok", detail
     console = core.find_console_log()
     if console is None:
         return "warn", (
@@ -453,6 +466,31 @@ def diagnostic_report() -> list[dict]:
     items.append(
         {"title": "Piloto automático por mapa", "state": state, "detail": detail}
     )
+
+    daemon = query_daemon()
+    if daemon is not None:
+        detail = (
+            f"ativo (pid {daemon.get('pid', '?')}); troca de perfil por mapa "
+            "funciona com a janela fechada"
+        )
+        items.append({"title": "Daemon (piloto sem janela)", "state": "ok", "detail": detail})
+    elif daemon_unit_installed():
+        items.append(
+            {
+                "title": "Daemon (piloto sem janela)",
+                "state": "info",
+                "detail": "serviço instalado, parado; inicie com multilut-ctl daemon start",
+            }
+        )
+    else:
+        items.append(
+            {
+                "title": "Daemon (piloto sem janela)",
+                "state": "info",
+                "detail": "opcional; instale com multilut-ctl daemon install "
+                "para o piloto funcionar sem a janela aberta",
+            }
+        )
 
     state, detail = preview_stack_status()
     items.append({"title": "Simulação de LUT (Pillow/numpy)", "state": state, "detail": detail})
@@ -548,3 +586,450 @@ def import_config_bundle(source: Path) -> dict:
             "config_keys": len(data),
             "history_entries": history_entries,
         }
+
+
+# ------------------------------------------------------------ daemon (piloto sem janela)
+DAEMON_UNIT_NAME = "multilut-daemon.service"
+DAEMON_UNIT_TEMPLATE = """[Unit]
+Description=MultiLUT Controller - piloto automatico por mapa (sem janela)
+Documentation=https://github.com/felipesantiago-coder/multilut-controller
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 @APP_DIR@/multilut_daemon.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def daemon_runtime_dir() -> Path:
+    """Diretório do socket de controle (XDG_RUNTIME_DIR ou /tmp por usuário)."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    base = Path(runtime) if runtime else Path(tempfile.gettempdir())
+    return base / f"multilut-controller-{os.getuid()}"
+
+
+def daemon_socket_path() -> Path:
+    return daemon_runtime_dir() / "daemon.sock"
+
+
+def daemon_status_path() -> Path:
+    return core.app_state_dir() / "daemon.json"
+
+
+def write_daemon_status(data: dict) -> None:
+    """Grava o estado do daemon para leitura por GUI/CLI quando o socket não responde."""
+    path = daemon_status_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+        core._atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n", mode)
+    except OSError:
+        pass
+
+
+def read_daemon_status() -> dict | None:
+    path = daemon_status_path()
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def query_daemon(timeout: float = 1.5) -> dict | None:
+    """Consulta o daemon vivo pelo socket; None quando não está rodando."""
+    path = daemon_socket_path()
+    if not path.exists():
+        return None
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(str(path))
+            client.sendall(b'{"cmd": "status"}\n')
+            reply = b""
+            while b"\n" not in reply:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                reply += chunk
+    except OSError:
+        return None
+    try:
+        data = json.loads(reply.decode("utf-8", errors="ignore").strip())
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def daemon_running() -> bool:
+    return query_daemon() is not None
+
+
+def daemon_status() -> dict:
+    """Estado para CLI/GUI: socket ao vivo, senão último estado gravado."""
+    live = query_daemon()
+    if live is not None:
+        return {"alive": True, **live}
+    stored = read_daemon_status() or {}
+    return {"alive": False, **stored}
+
+
+def daemon_systemctl(action: str) -> tuple[bool, str]:
+    """systemctl --user <ação> no serviço do daemon; (False, motivo) sem systemd."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", action, DAEMON_UNIT_NAME],
+            capture_output=True,
+            text=True,
+            timeout=20.0,
+        )
+    except FileNotFoundError:
+        return False, "systemctl não disponível neste sistema."
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"systemctl falhou: {exc}"
+    detail = (out.stdout or out.stderr or "").strip().splitlines()
+    return out.returncode == 0, detail[-1] if detail else ""
+
+
+def daemon_unit_installed(unit_dir: Path | None = None) -> bool:
+    return daemon_unit_path(unit_dir).is_file()
+
+
+def daemon_unit_path(unit_dir: Path | None = None) -> Path:
+    root = unit_dir or (Path.home() / ".config/systemd/user")
+    return root / DAEMON_UNIT_NAME
+
+
+def daemon_install_unit(app_dir: Path | None = None, unit_dir: Path | None = None) -> Path:
+    """Instala o serviço de usuário apontando para o diretório real do app."""
+    app_dir = app_dir or core.app_repo_dir()
+    unit_path = daemon_unit_path(unit_dir)
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    content = DAEMON_UNIT_TEMPLATE.replace("@APP_DIR@", str(app_dir))
+    core._atomic_write(unit_path, content, 0o644)
+    daemon_systemctl("daemon-reload")
+    return unit_path
+
+
+def daemon_uninstall_unit(unit_dir: Path | None = None) -> bool:
+    unit_path = daemon_unit_path(unit_dir)
+    if not unit_path.is_file():
+        return False
+    daemon_systemctl("stop")
+    daemon_systemctl("disable")
+    try:
+        unit_path.unlink()
+    except OSError:
+        pass
+    daemon_systemctl("daemon-reload")
+    return True
+
+
+def daemon_start() -> tuple[bool, str]:
+    """Inicia o daemon: via systemd quando o serviço existe, senão avulso."""
+    if daemon_running():
+        return True, "O daemon já está em execução."
+    if daemon_unit_installed():
+        ok, detail = daemon_systemctl("start")
+        if not ok:
+            return False, detail or "systemctl não iniciou o serviço."
+    else:
+        app_dir = core.app_repo_dir()
+        script = app_dir / "multilut_daemon.py"
+        if not script.is_file():
+            return False, f"multilut_daemon.py não encontrado em {app_dir}."
+        try:
+            subprocess.Popen(
+                ["/usr/bin/python3" if Path("/usr/bin/python3").is_file() else "python3",
+                 str(script)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            return False, f"Não foi possível iniciar o daemon: {exc}"
+    for _ in range(20):  # até ~2 s para o socket aparecer
+        if daemon_running():
+            return True, "Daemon iniciado (piloto ativo sem janela)."
+        time.sleep(0.1)
+    return False, "O daemon não respondeu após o início."
+
+
+def daemon_stop() -> tuple[bool, str]:
+    """Para o daemon: manda stop pelo socket e, se houver serviço, para pelo systemd."""
+    stopped = False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(str(daemon_socket_path()))
+            client.sendall(b'{"cmd": "stop"}\n')
+            client.recv(4096)
+            stopped = True
+    except OSError:
+        pass
+    if daemon_unit_installed():
+        daemon_systemctl("stop")
+    for _ in range(20):
+        if not daemon_running():
+            return True, "Daemon parado." if stopped else "Daemon parado (serviço do systemd)."
+        time.sleep(0.1)
+    return False, "O daemon continua respondendo; verifique systemctl --user status multilut-daemon."
+
+
+# ------------------------------------------------------------ autostart na sessão
+AUTOSTART_DESKTOP_TEMPLATE = """[Desktop Entry]
+Type=Application
+Name=MultiLUT Controller
+Comment=Gerencie perfis MultiLUT do Insurgency no vkBasalt
+Exec=@APP_DIR@/run.sh@MINIMIZED@
+Icon=com.felipesantiago.MultiLUTController
+Terminal=false
+Categories=Game;Utility;GTK;
+Keywords=vkBasalt;ReShade;LUT;Insurgency;Vulkan;
+StartupNotify=true
+StartupWMClass=com.felipesantiago.MultiLUTController
+X-GNOME-Autostart-enabled=true
+"""
+
+
+def autostart_path() -> Path:
+    """Entrada XDG de autostart da sessão (~/.config/autostart)."""
+    return Path.home() / ".config/autostart/com.felipesantiago.MultiLUTController.desktop"
+
+
+def autostart_installed() -> bool:
+    return autostart_path().is_file()
+
+
+def autostart_install(app_dir: Path | None = None, minimized: bool = True) -> Path:
+    """Instala a entrada de autostart; a janela pode abrir oculta (--minimized)."""
+    app_dir = app_dir or core.app_repo_dir()
+    flag = " --minimized" if minimized else ""
+    target = autostart_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    content = AUTOSTART_DESKTOP_TEMPLATE.replace("@APP_DIR@", str(app_dir))
+    content = content.replace("@MINIMIZED@", flag)
+    core._atomic_write(target, content, 0o644)
+    return target
+
+
+def autostart_remove() -> bool:
+    target = autostart_path()
+    try:
+        target.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
+# ------------------------------------------------------------ relatório de diagnóstico
+def _distro_pretty_name() -> str:
+    for candidate in ("/etc/os-release", "/usr/lib/os-release"):
+        try:
+            for line in Path(candidate).read_text(encoding="utf-8").splitlines():
+                if line.startswith("PRETTY_NAME="):
+                    return line.split("=", 1)[1].strip().strip('"')
+        except OSError:
+            continue
+    return "desconhecida"
+
+
+def build_diagnostic_text(
+    include_log_tail: bool = True,
+    log_tail_lines: int = 60,
+    history_limit: int = 20,
+) -> str:
+    """Relatório em texto pronto para colar em uma issue do projeto.
+
+    Reúne versões, ambiente, itens do doctor, configuração relevante,
+    histórico recente e (opcional) o final do console.log do jogo.
+    """
+    lines: list[str] = []
+    lines.append(f"MultiLUT Controller v{core.APP_VERSION} — relatório de diagnóstico")
+    lines.append(f"Gerado em {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("")
+    lines.append("== Ambiente ==")
+    lines.append(f"Distribuição: {_distro_pretty_name()}")
+    lines.append(f"Kernel: {platform.release()}")
+    lines.append(f"Python: {platform.python_version()}")
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").strip() or "desconhecido"
+    session_type = os.environ.get("XDG_SESSION_TYPE", "").strip() or "?"
+    lines.append(f"Sessão: {desktop} ({session_type})")
+    head = core.local_git_head()
+    lines.append(f"Instalação: {'git ' + head if head else 'sem git (cópia)'}")
+    daemon = query_daemon()
+    if daemon is not None:
+        lines.append(
+            f"Daemon: ativo (pid {daemon.get('pid', '?')}, "
+            f"eventos: {daemon.get('events', 0)})"
+        )
+    else:
+        lines.append("Daemon: inativo")
+    lines.append("")
+
+    lines.append("== Diagnóstico ==")
+    labels = {"ok": "ok   ", "warn": "aviso", "fail": "FALHA", "info": "info "}
+    try:
+        items = diagnostic_report()
+    except Exception as exc:  # noqa: BLE001 - relatório nunca levanta
+        items = [{"title": "Diagnóstico", "state": "fail", "detail": str(exc)}]
+    for item in items:
+        state = str(item.get("state") or "?")
+        lines.append(
+            f"[{labels.get(state, state)}] {item.get('title')}: {item.get('detail')}"
+        )
+    lines.append("")
+
+    lines.append("== Configuração relevante ==")
+    config = core.load_config()
+    interesting = (
+        "shader_path",
+        "game_dir",
+        "auto_map_switch",
+        "auto_apply_on_launch",
+        "notify_changes",
+        "global_shortcut",
+        "autostart_minimized",
+        "check_updates",
+        "game_width",
+        "game_height",
+    )
+    for key in interesting:
+        if key in config:
+            lines.append(f"{key}: {config[key]}")
+    lines.append("")
+
+    lines.append(f"== Histórico (últimos {history_limit}) ==")
+    entries = core.read_history(limit=history_limit)
+    if not entries:
+        lines.append("(histórico vazio)")
+    for entry in reversed(entries):
+        lines.append(
+            f"{entry.get('ts', '?')}  {entry.get('profile_id', '?')} — "
+            f"{entry.get('profile_name', '?')}  [{entry.get('origin', '?')}]"
+            + (f"  ({entry['detail']})" if entry.get("detail") else "")
+        )
+    lines.append("")
+
+    lines.append(f"== console.log (últimas {log_tail_lines} linhas) ==")
+    console = core.find_console_log() if include_log_tail else None
+    if console is None:
+        lines.append("(console.log ausente; adicione -condebug à opção do jogo)")
+    else:
+        try:
+            with console.open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                size = stream.tell()
+                stream.seek(max(0, size - 131072))
+                tail = stream.read().decode("utf-8", errors="ignore")
+            tail_lines = tail.splitlines()[-log_tail_lines:]
+            lines.extend(tail_lines if tail_lines else "(arquivo vazio)")
+        except OSError as exc:
+            lines.append(f"(não foi possível ler: {exc})")
+    return "\n".join(lines) + "\n"
+
+
+def export_diagnostic_report(target: Path) -> dict:
+    """Exporta o relatório: texto puro (.txt) ou .zip com config e histórico."""
+    target = Path(target).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    report = build_diagnostic_text()
+    if target.suffix.lower() == ".zip":
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr("relatorio-diagnostico.txt", report)
+            members = 1
+            config = core.load_config()
+            if config:
+                bundle.writestr(
+                    "config.json", json.dumps(config, ensure_ascii=False, indent=2)
+                )
+                members += 1
+            history = core.history_path()
+            if history.is_file():
+                bundle.write(history, "history.jsonl")
+                members += 1
+        return {"path": str(target), "zip": True, "members": members}
+    target.write_text(report, encoding="utf-8")
+    return {"path": str(target), "zip": False, "members": 1}
+
+
+# ------------------------------------------------------------ central de ajuda
+HELP_SHORTCUTS: tuple[tuple[str, str], ...] = (
+    ("<Ctrl>F", "Foca a busca de perfis"),
+    ("<Ctrl>Enter", "Aplica o perfil selecionado"),
+    ("<Ctrl>Z", "Restaura o último backup do shader"),
+    ("<Ctrl>?", "Abre esta central de ajuda"),
+    ("<Ctrl><Alt>L", "Cicla para o próximo perfil em qualquer app (quando o "
+        "atalho global está ativado na aba Perfis; o pedido aparece no portal "
+        "do sistema na primeira vez)"),
+)
+
+HELP_GLOSSARY: tuple[tuple[str, str], ...] = (
+    ("LUT", "Tabela de cores (Look-Up Table) que transforma as cores da tela; "
+        "cada perfil do aplicativo usa uma LUT do atlas."),
+    ("Atlas", "Textura MultiLut_Insurgency_Optimized.png com 32 fatias x 17 "
+        "linhas de LUT; o shader escolhe a linha pelo perfil ativo."),
+    ("Perfil", "Efeito pré-ajustado (perfis utilitários 0-16 e perfis por mapa "
+        "17-24). O perfil ativo fica gravado no shader .fx."),
+    ("vkBasalt", "Camada Vulkan de pós-processamento; precisa de "
+        "ENABLE_VKBASALT=1 na opção de inicialização do jogo."),
+    ("Opção de inicialização", "Comandos que o Steam adiciona ao abrir o jogo "
+        "(%command% ENABLE_VKBASALT=1 -condebug); o app verifica e corrige "
+        "pela aba Sistema."),
+    ("-condebug", "Flag do jogo que grava o console.log na pasta do jogo; é o "
+        "que permite ao piloto saber qual mapa carregou."),
+    ("console.log", "Registro do console do jogo (pasta raiz da instalação); "
+        "as linhas 'Map: <mapa>' revelam o mapa carregado."),
+    ("Piloto automático", "Monitor do console.log que aplica o perfil do mapa "
+        "assim que ele é carregado; funciona na janela aberta ou pelo daemon."),
+    ("Daemon", "Piloto rodando como serviço de usuário (systemd), sem janela; "
+        "a interface e a CLI apenas o controlam (multilut-ctl daemon)."),
+    ("Backup do shader", "Cópia .multilut-backup do .fx criada a cada troca; "
+        "Ctrl+Z restaura a anterior."),
+)
+
+HELP_TROUBLESHOOTING: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("O piloto não troca o LUT quando o mapa carrega", (
+        "Confira se a opção 'Trocar perfil conforme o mapa' está ligada.",
+        "Confira -condebug na opção de inicialização (aba Sistema corrigirá).",
+        "Abra a aba Sistema: o item 'Piloto automático por mapa' precisa estar ok.",
+        "Só mapas com perfil próprio disparam troca (Market, Ministry, Peak, "
+        "Revolt, Siege, Tell, Uprising, Kandagal, Sinjar, Buhriz, Panj, "
+        "Verticality, Heights, Dry Canal...); mapas sem perfil são ignorados.",
+        "Com o daemon ativo, a janela não precisa estar aberta; veja "
+        "'multilut-ctl daemon status'.",
+    )),
+    ("console.log não encontrado", (
+        "Adicione -condebug à opção de inicialização do jogo (aba Sistema "
+        "faz isso com o Steam fechado).",
+        "Confirme a instalação do jogo detectada na aba Sistema.",
+        "O arquivo só aparece depois do primeiro boot do jogo com a flag.",
+    )),
+    ("Shader não localizado ou incompatível", (
+        "Use 'Instalar/atualizar pacote' na aba Perfis (copia o pacote v1.8).",
+        "Confira o caminho em ~/.config/vkBasalt/reshade-shaders/Shaders/.",
+        "Ctrl+Z restaura o último backup se uma troca recente deu errado.",
+    )),
+    ("Atlas com geometria inesperada", (
+        "O atlas precisa ter exatamente 1024x544 (32 fatias x 17 linhas).",
+        "Na aba Atlas use 'Restaurar pacote' para voltar ao PNG oficial.",
+    )),
+    ("Simulação de LUT indisponível", (
+        "Instale os pacotes opcionais: sudo eopkg it numpy python-pillow.",
+        "Depois reabra o aplicativo; os demais recursos não dependem disso.",
+    )),
+    ("Duas trocas acontecem em sequência (janela e daemon)", (
+        "Isso não deve ocorrer: quando o daemon está ativo, a janela fica "
+        "em modo observador. Se acontecer, pare o daemon "
+        "(multilut-ctl daemon stop) e informe o caso em uma issue.",
+    )),
+)
