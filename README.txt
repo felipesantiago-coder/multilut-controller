@@ -127,8 +127,10 @@ AUTOMACAO E INTEGRACAO
 
 - CLI sem interface: multilut-ctl list, multilut-ctl set <perfil>,
   multilut-ctl next [--anterior], multilut-ctl active, multilut-ctl status,
-  multilut-ctl doctor [--json], multilut-ctl history [--limit N] e
-  multilut-ctl preview/rows/atlas/reindex. O casamento aceita id, nome sem
+  multilut-ctl doctor [--json], multilut-ctl history [--limit N],
+  multilut-ctl rules [remove <mapa>], multilut-ctl launch [--force],
+  multilut-ctl brightness [enable on|off / set <mapa> <0-100> / default <n>
+  / clear <mapa>], multilut-ctl preview/rows/atlas/reindex. O casamento aceita id, nome sem
   acentos ou slug do mapa (ex.: multilut-ctl set drycanal). "next" cicla o
   proximo (ou anterior) perfil como o atalho global; "doctor" imprime o
   mesmo checklist da pagina Sistema (em JSON com --json) e devolve codigo
@@ -172,6 +174,13 @@ AUTOMACAO E INTEGRACAO
 - Notificacao com Desfazer: trocas do piloto com a janela oculta avisam no
   desktop com "antigo -> novo" e o botao "Desfazer" devolve o perfil anterior
   (janela e daemon); "Desfeito" aparece como origem no historico.
+- Brilho do monitor por mapa (DDC/CI, opcional): com o ddcutil instalado
+  (Solus: sudo eopkg it ddcutil) e o recurso ligado (interruptor na pagina
+  Sistema ou "multilut-ctl brightness enable on"), o daemon e a janela
+  ajustam o brilho fisico do monitor quando o mapa carrega (ex.:
+  "multilut-ctl brightness set sinjar_night 70", "default 60" para os
+  demais). O brilho original e restaurado quando um mapa sem nivel carrega,
+  quando o jogo fecha (checagem a cada 60s no daemon) ou no encerramento.
 - Daemon do piloto (sem janela): o mesmo piloto pode rodar como servico de
   usuario do systemd, trocando o perfil pelo mapa mesmo com a interface
   fechada. Instale/inicie com "multilut-ctl daemon install" (ou "daemon
@@ -407,6 +416,11 @@ ATLAS DO PERFIL E DIAGNOSTICO EXTRAS
   selecionada" grava a LUT gerada no atlas com backup. Apenas efeitos de
   cor pontuais sao encodaveis numa LUT 3D — vinheta/nitidez ficam de fora
   por design.
+- Analise das LUTs no doctor: o item "Atlas — analise das LUTs" da nota
+  0-10 para cada linha do atlas instalado — geometria, cores unicas,
+  variacao e se a linha e identidade (nao altera a imagem). Linhas
+  corrompidas (ex.: LUTs quebradas de workshop) recebem nota baixa e o
+  doctor avisa com as piores tres; restaurar pela aba Atlas resolve.
 
 VALIDACAO
 ---------

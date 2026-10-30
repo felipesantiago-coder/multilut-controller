@@ -771,3 +771,67 @@ def apply_params_to_image(
     out = apply_lut_params(arr, brightness, contrast, saturation, temperature)
     pixels = (out * 255.0 + 0.5).astype(np.uint8)
     return Image.fromarray(pixels, "RGB")
+
+
+# --------------------------------------------------------------------------
+# Análise das linhas do atlas (doctor; detecta LUTs corrompidas)
+# --------------------------------------------------------------------------
+def atlas_row_strip(atlas_image: "Image.Image", row: int) -> "Image.Image":
+    """Faixa 1024x32 da linha do atlas (sem validar a linha)."""
+    return atlas_image.crop(
+        (0, row * ATLAS_TILE, STRIP_WIDTH, (row + 1) * ATLAS_TILE)
+    )
+
+
+def analyze_row_strip(strip: "Image.Image") -> dict:
+    """Métricas de uma faixa de LUT: desvio da identidade, cores únicas, flat.
+
+    "Identidade" aqui é a LUT que devolve a própria entrada — um perfil
+    importado igual à identidade não altera nada na tela.
+    """
+    arr = np.asarray(strip.convert("RGB"), dtype=np.float32)
+    identity = np.asarray(
+        strip_image_from_cube(
+            {"size": ATLAS_TILE, "table": identity_table(ATLAS_TILE)}
+        ),
+        dtype=np.float32,
+    )
+    dev = np.abs(arr - identity)
+    pixels = arr.reshape(-1, 3).astype(np.uint8)
+    return {
+        "mean_dev": float(dev.mean()),
+        "max_dev": float(dev.max()),
+        "unique_colors": int(np.unique(pixels, axis=0).shape[0]),
+        "flat": bool(float(arr.std()) < 0.5),
+    }
+
+
+def score_row(metrics: dict) -> tuple[int, list[str]]:
+    """Nota 0-10 da linha + observações legíveis (identidade é aviso, não falha)."""
+    score = 10
+    notes: list[str] = []
+    if metrics["flat"]:
+        score -= 5
+        notes.append("faixa sem variação (provável corrupção)")
+    elif metrics["unique_colors"] < 256:
+        score -= 3
+        notes.append("poucas cores únicas (possível corrupção)")
+    if metrics["mean_dev"] < 0.6:
+        notes.append("identidade: não altera a imagem")
+    return max(0, min(10, score)), notes
+
+
+def analyze_atlas(atlas_path: Path | str) -> dict:
+    """Nota 0-10 e métricas por linha do atlas instalado."""
+    if np is None:
+        raise AtlasError(
+            "Análise de LUT requer numpy e Pillow "
+            "(no Solus: sudo eopkg it numpy python-pillow)."
+        )
+    image = load_atlas_image(atlas_path)
+    rows: list[dict] = []
+    for row in range(ATLAS_ROWS):
+        metrics = analyze_row_strip(atlas_row_strip(image, row))
+        score, notes = score_row(metrics)
+        rows.append({"row": row, "score": score, "notes": notes, **metrics})
+    return {"path": str(atlas_path), "rows": rows}

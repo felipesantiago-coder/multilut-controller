@@ -585,6 +585,12 @@ def diagnostic_report() -> list[dict]:
     state, detail = map_rules_status()
     items.append({"title": "Regras aprendidas por mapa", "state": state, "detail": detail})
 
+    state, detail = atlas_analysis_status()
+    items.append({"title": "Atlas — análise das LUTs", "state": state, "detail": detail})
+
+    state, detail = ddc_status()
+    items.append({"title": "Brilho DDC/CI por mapa", "state": state, "detail": detail})
+
     daemon = query_daemon()
     if daemon is not None:
         detail = (
@@ -1091,6 +1097,193 @@ HELP_SHORTCUTS: tuple[tuple[str, str], ...] = (
         "do sistema na primeira vez)"),
 )
 
+# ------------------------------------------------------- brilho DDC/CI (F18)
+DDC_BRIGHTNESS_VCP = 10  # código VCP do brilho (MCCS)
+
+
+def ddcutil_binary() -> str | None:
+    return shutil.which("ddcutil")
+
+
+def parse_ddc_brightness(output: str | None) -> int | None:
+    """Brilho em % da saída de 'ddcutil --brief getvcp 10'.
+
+    Formato breve: 'VCP 10 C B <atual> [<máximo>]'; os números relevantes vêm
+    DEPOIS do marcador B (o que está antes é o código VCP). Com dois números,
+    a porcentagem é atual*100/máximo; com um, é o próprio valor.
+    """
+    for line in reversed(
+        [item for item in (output or "").strip().splitlines() if item.strip()]
+    ):
+        marker = re.search(r"\bB\b", line)
+        segment = line[marker.end() :] if marker else line
+        numbers = re.findall(r"\d+(?:\.\d+)?", segment)
+        if not numbers:
+            continue
+        if len(numbers) >= 2:
+            current, maximum = float(numbers[-2]), float(numbers[-1])
+            if maximum > 0:
+                return max(0, min(100, round(current * 100 / maximum)))
+        return max(0, min(100, round(float(numbers[-1]))))
+    return None
+
+
+class BrightnessController:
+    """Brilho do monitor por mapa via DDC/CI, com restauração única.
+
+    Guarda o brilho original na primeira alteração da sessão e o restaura
+    quando o mapa atual não tem nível definido, quando o jogo fecha ou no
+    encerramento do daemon. ``runner``/``getter`` injetáveis para testes.
+    """
+
+    def __init__(self, runner=None, getter=None):
+        self._runner = runner or self._default_runner
+        self._getter = getter or self._default_getter
+        self.original: int | None = None
+        self.applied_map: str | None = None
+        self.modified = False
+
+    @staticmethod
+    def _default_runner(argv: list[str]):
+        return subprocess.run(argv, capture_output=True, text=True, timeout=25)
+
+    @classmethod
+    def _default_getter(cls) -> int | None:
+        binary = ddcutil_binary()
+        if binary is None:
+            return None
+        try:
+            outcome = subprocess.run(
+                [binary, "--brief", "getvcp", str(DDC_BRIGHTNESS_VCP)],
+                capture_output=True,
+                text=True,
+                timeout=25,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if outcome.returncode != 0:
+            return None
+        return parse_ddc_brightness(outcome.stdout)
+
+    def available(self) -> bool:
+        return ddcutil_binary() is not None
+
+    def set_brightness(self, level: int) -> bool:
+        binary = ddcutil_binary()
+        if binary is None and self._runner is type(self)._default_runner:
+            return False  # sem ddcutil no sistema (runner padrão)
+        binary = binary or "ddcutil"  # runner injetado: nome simbólico
+        level = max(0, min(100, int(level)))
+        try:
+            outcome = self._runner(
+                [binary, "setvcp", str(DDC_BRIGHTNESS_VCP), str(level)]
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return bool(getattr(outcome, "returncode", 1) == 0)
+
+    def restore(self, reason: str = "") -> str | None:
+        """Devolve o brilho original uma única vez; None quando nada a fazer."""
+        if not self.modified or self.original is None:
+            return None
+        level = self.original
+        if self.set_brightness(level):
+            self.modified = False
+            self.applied_map = None
+            detail = f"brilho restaurado para {level}%"
+            if reason:
+                detail += f" ({reason})"
+            return detail
+        return None
+
+    def _restore_if_needed(self, reason: str) -> str | None:
+        if self.modified:
+            return self.restore(reason)
+        return None
+
+    def apply_for_map(self, config: dict | None, token: str) -> str | None:
+        """Aplica o nível do mapa (ou restaura); devolve mensagem ou None."""
+        ddc = (config or {}).get("ddc")
+        if not isinstance(ddc, dict) or not bool(ddc.get("enabled", False)):
+            return self._restore_if_needed("recurso desligado")
+        levels = ddc.get("levels")
+        levels = levels if isinstance(levels, dict) else {}
+        raw_level = levels.get(str(token), ddc.get("default_level"))
+        if raw_level is None:
+            return self._restore_if_needed(f"{token} sem nível definido")
+        try:
+            level = int(raw_level)
+        except (TypeError, ValueError):
+            return self._restore_if_needed(f"nível inválido para {token}")
+        if self.original is None:
+            current = self._getter()
+            if current is not None:
+                self.original = int(current)
+        if self.set_brightness(level):
+            self.applied_map = str(token)
+            self.modified = True
+            return f"Brilho do monitor: {max(0, min(100, level))}% ({token})"
+        return None
+
+
+def ddc_status() -> tuple[str, str]:
+    """Estado do brilho DDC/CI por mapa para o doctor."""
+    binary = ddcutil_binary()
+    if binary is None:
+        return (
+            "info",
+            "ddcutil não instalado (sudo eopkg it ddcutil); recurso opcional "
+            "de brilho físico por mapa",
+        )
+    ddc = core.load_config().get("ddc")
+    if not isinstance(ddc, dict) or not bool(ddc.get("enabled", False)):
+        return (
+            "info",
+            "ddcutil disponível; desligado (multilut-ctl brightness enable on)",
+        )
+    levels = ddc.get("levels")
+    levels = levels if isinstance(levels, dict) else {}
+    detail = f"ligado; {len(levels)} mapa(s) com nível definido"
+    if ddc.get("default_level") is not None:
+        detail += f"; padrão {ddc.get('default_level')}%"
+    return "ok", detail
+
+
+def atlas_analysis_status() -> tuple[str, str]:
+    """Nota 0-10 das linhas do atlas instalado para o doctor."""
+    try:
+        import multilut_atlas as atlas_mod
+    except (ImportError, ValueError):  # pragma: no cover
+        return "info", "módulo do atlas indisponível"
+    installed = core.default_texture_path()
+    if not installed.is_file():
+        return "info", "atlas não instalado; use Instalar/atualizar pacote"
+    try:
+        report = atlas_mod.analyze_atlas(installed)
+    except core.MultiLUTError as exc:
+        return "info", str(exc)
+    rows = report["rows"]
+    scored = [row for row in rows if row["score"] < 10]
+    worst = sorted(scored, key=lambda row: row["score"])[:3]
+    identities = sum(
+        1 for row in rows if any("identidade" in note for note in row["notes"])
+    )
+    if worst and worst[0]["score"] < 8:
+        detail = "; ".join(
+            f"linha {row['row']}: nota {row['score']}/10 "
+            f"({' - '.join(row['notes']) or 'baixa'})"
+            for row in worst
+        )
+        return "warn", detail
+    detail = (
+        f"{len(rows)} linhas analisadas; menor nota "
+        f"{min(row['score'] for row in rows)}/10"
+    )
+    if identities:
+        detail += f"; {identities} linha(s) em identidade"
+    return "ok", detail
+
+
 HELP_GLOSSARY: tuple[tuple[str, str], ...] = (
     ("LUT", "Tabela de cores (Look-Up Table) que transforma as cores da tela; "
         "cada perfil do aplicativo usa uma LUT do atlas."),
@@ -1114,6 +1307,9 @@ HELP_GLOSSARY: tuple[tuple[str, str], ...] = (
     ("Regras aprendidas", "Associações mapa → perfil criadas pelo botão "
         "“Sempre neste mapa” após uma troca manual com o jogo aberto; valem "
         "para o piloto da janela e do daemon (config[\"map_rules\"])."),
+    ("DDC/CI", "Canal do monitor que permite ao computador ajustar brilho e "
+        "contraste físicos (via ddcutil); o app usa isso para clarear "
+        "monitores em mapas noturnos, com restauração automática."),
     ("Backup do shader", "Cópia .multilut-backup do .fx criada a cada troca; "
         "Ctrl+Z restaura a anterior."),
 )

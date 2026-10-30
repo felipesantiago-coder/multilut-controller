@@ -373,6 +373,57 @@ def cmd_launch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_brightness(args: argparse.Namespace) -> int:
+    """Níveis de brilho DDC/CI por mapa (config['ddc']); requer ddcutil."""
+    import multilut_extra as extra
+
+    config = core.load_config()
+    ddc = config.get("ddc")
+    ddc = ddc if isinstance(ddc, dict) else {"enabled": False, "levels": {}}
+    ddc.setdefault("levels", {})
+    acao = args.acao
+    if acao == "enable":
+        ddc["enabled"] = args.estado == "on"
+        config["ddc"] = ddc
+        core.save_config(config)
+        estado = "ativado" if ddc["enabled"] else "desativado"
+        if ddc["enabled"] and extra.ddcutil_binary() is None:
+            print(
+                f"Brilho por mapa {estado}, mas o ddcutil não está instalado "
+                "(Solus: sudo eopkg it ddcutil)."
+            )
+        else:
+            print(f"Brilho por mapa {estado}.")
+        return 0
+    if acao == "set":
+        level = max(0, min(100, args.nivel))
+        ddc["levels"][core.normalize_map_token(args.mapa)] = level
+        config["ddc"] = ddc
+        core.save_config(config)
+        print(f"Brilho de {core.normalize_map_token(args.mapa)}: {level}%")
+        return 0
+    if acao == "default":
+        ddc["default_level"] = max(0, min(100, args.nivel))
+        config["ddc"] = ddc
+        core.save_config(config)
+        print(f"Brilho padrão: {ddc['default_level']}% (mapas sem nível próprio)")
+        return 0
+    if acao == "clear":
+        removed = ddc["levels"].pop(core.normalize_map_token(args.mapa), None)
+        config["ddc"] = ddc
+        core.save_config(config)
+        print(f"Nível removido de {args.mapa}." if removed is not None else f"{args.mapa} não tinha nível.")
+        return 0 if removed is not None else 1
+    if extra.ddcutil_binary() is None:
+        print("ddcutil não instalado (Solus: sudo eopkg it ddcutil).")
+        return 1
+    print(f"enabled: {str(bool(ddc.get('enabled', False))).lower()}")
+    print(f"default: {ddc.get('default_level')}")
+    for token, level in sorted(ddc["levels"].items()):
+        print(f"{token}: {level}%")
+    return 0
+
+
 def resolve_atlas(explicit: str | None) -> Path:
     """Atlas v1.8: --atlas, textura instalada válida ou pacote do app."""
     candidates: list[Path] = []
@@ -611,6 +662,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="abre mesmo com pré-requisitos pendentes",
     )
     launch_parser.set_defaults(func=cmd_launch)
+
+    brightness_parser = subparsers.add_parser(
+        "brightness",
+        parents=[common],
+        help="brilho físico do monitor por mapa (DDC/CI, requer ddcutil)",
+    )
+    brightness_sub = brightness_parser.add_subparsers(dest="acao")
+    enable_parser = brightness_sub.add_parser(
+        "enable", parents=[common], help="liga/desliga o recurso"
+    )
+    enable_parser.add_argument("estado", choices=["on", "off"])
+    set_parser = brightness_sub.add_parser(
+        "set", parents=[common], help="define o brilho de um mapa (0-100)"
+    )
+    set_parser.add_argument("mapa", help="nome do mapa (ex.: tell)")
+    set_parser.add_argument("nivel", type=int)
+    default_parser = brightness_sub.add_parser(
+        "default", parents=[common], help="brilho para mapas sem nível"
+    )
+    default_parser.add_argument("nivel", type=int)
+    clear_parser = brightness_sub.add_parser(
+        "clear", parents=[common], help="remove o nível de um mapa"
+    )
+    clear_parser.add_argument("mapa", help="nome do mapa")
+    brightness_parser.set_defaults(func=cmd_brightness, acao="show")
 
     preview_parser = subparsers.add_parser(
         "preview",

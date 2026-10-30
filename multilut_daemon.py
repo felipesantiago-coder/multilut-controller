@@ -62,6 +62,7 @@ class DaemonPilot:
         self._tail: core.ConsoleTail | None = None
         self._debounce_id: int | None = None
         self.stop_requested = False
+        self.brightness = extra.BrightnessController()
 
     # ------------------------------------------------------------ comando/status
     def status(self) -> dict:
@@ -137,6 +138,7 @@ class DaemonPilot:
             return None
         if not bool(config.get("auto_map_switch", False)):
             return None
+        self._apply_brightness(config, token)
         shader = self.resolve_shader()
         if shader is None:
             return None
@@ -180,6 +182,26 @@ class DaemonPilot:
             undo_profile_id=active,
         )
         return {"token": token, "profile_id": profile.id, "profile_name": profile.name, "changed": True}
+
+    def _apply_brightness(self, config: dict, token: str) -> None:
+        """Brilho físico do monitor por mapa (DDC/CI, opcional e silencioso)."""
+        try:
+            message = self.brightness.apply_for_map(config, token)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return
+        if message:
+            self._notify("MultiLUT: brilho do monitor", message)
+
+    def _watch_game_for_brightness(self) -> bool:
+        """Tique periódico: restaura o brilho quando o jogo fecha."""
+        try:
+            if self.brightness.modified and not core.is_game_running():
+                message = self.brightness.restore(reason="jogo fechado")
+                if message:
+                    self._notify("MultiLUT: brilho do monitor", message)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            pass
+        return True  # continua ticando
 
     def apply_profile_id(self, profile_id: int, origin: str = "daemon") -> dict | None:
         """Aplica um perfil específico pelo id (usado pelo desfazer da notificação)."""
@@ -273,6 +295,9 @@ class DaemonPilot:
     # ------------------------------------------------------------ monitor do console.log
     def start(self) -> None:
         self._ensure_monitor()
+        if GLib is not None:
+            # restaura o brilho DDC/CI quando o jogo fechar (checagem a 60s)
+            GLib.timeout_add_seconds(60, self._watch_game_for_brightness)
         self.record_status()
 
     def _sync_monitor_state(self) -> None:
@@ -486,6 +511,10 @@ def main(argv: list[str] | None = None) -> int:
 
     def shutdown() -> bool:
         pilot._cancel_monitor()
+        try:
+            pilot.brightness.restore(reason="daemon encerrado")
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
         pilot.record_status_stopped()
         server.stop()
         loop.quit()

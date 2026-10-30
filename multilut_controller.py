@@ -381,6 +381,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self._atlas_pixbuf_source = None
         # último mapa visto no console.log (contexto para o aprendizado de regras)
         self._last_map_token = ""
+        # brilho físico por mapa (DDC/CI); só age com config['ddc']['enabled']
+        self._brightness = extra.BrightnessController()
         # ação da janela: “Sempre neste mapa” do toast de aprendizado
         associate = Gio.SimpleAction.new("associate-map", GLib.VariantType.new("s"))
         associate.connect("activate", self.on_associate_map)
@@ -550,6 +552,12 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             pass
         application = self.get_application()
         tray_icon = getattr(application, "_tray", None) if application else None
+        brightness = getattr(self, "_brightness", None)
+        if brightness is not None and brightness.modified:
+            try:
+                brightness.restore(reason="janela fechada")
+            except (OSError, ValueError):
+                pass
         if (
             tray_icon is not None
             and bool(self.config.get("tray_hide_on_close", True))
@@ -2096,6 +2104,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self._last_map_token = core.normalize_map_token(token) or token
         if not self.config.get("auto_map_switch", False):
             return
+        self._apply_brightness_for_map(token)
         if not self.shader_valid:
             return
         try:
@@ -2323,6 +2332,18 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.toast("Piloto automático retomado.")
         else:
             self.toast("Piloto automático pausado pela bandeja.", 5)
+
+    def _apply_brightness_for_map(self, token: str) -> None:
+        """Brilho físico do monitor por mapa (DDC/CI); silencioso quando off."""
+        controller = getattr(self, "_brightness", None)
+        if controller is None:
+            return
+        try:
+            message = controller.apply_for_map(self.config, token)
+        except (OSError, ValueError, Exception):  # noqa: B014 - nunca quebra o piloto
+            return
+        if message:
+            self.toast(message, 4)
 
     def _disable_hotkey_switch(self, reason: str) -> bool:
         self.toast(f"Atalho global indisponível: {reason}", 7)
@@ -2655,6 +2676,23 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         tray_close_box.append(self.tray_hide_switch)
         page.append(tray_close_box)
 
+        ddc_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        ddc_title = Gtk.Label(
+            label="Brilho do monitor por mapa (DDC/CI; níveis em "
+            "multilut-ctl brightness)",
+            xalign=0,
+        )
+        ddc_title.set_hexpand(True)
+        ddc_title.set_wrap(True)
+        self.ddc_switch = Gtk.Switch()
+        ddc_cfg = self.config.get("ddc")
+        ddc_cfg = ddc_cfg if isinstance(ddc_cfg, dict) else {}
+        self.ddc_switch.set_active(bool(ddc_cfg.get("enabled", False)))
+        self.ddc_switch.connect("state-set", self.on_ddc_changed)
+        ddc_box.append(ddc_title)
+        ddc_box.append(self.ddc_switch)
+        page.append(ddc_box)
+
         update_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self.update_label = Gtk.Label(
             label=f"MultiLUT Controller v{core.APP_VERSION}", xalign=0
@@ -2806,6 +2844,27 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         """Fechar a janela: ocultar para a bandeja (ligado) ou sair (desligado)."""
         self.config["tray_hide_on_close"] = bool(state)
         core.save_config(self.config)
+        return False
+
+    def on_ddc_changed(self, switch, state: bool) -> bool:
+        """Liga/desliga o brilho físico por mapa (DDC/CI via ddcutil)."""
+        ddc_cfg = self.config.get("ddc")
+        ddc_cfg = ddc_cfg if isinstance(ddc_cfg, dict) else {}
+        ddc_cfg["enabled"] = bool(state)
+        ddc_cfg.setdefault("levels", {})
+        self.config["ddc"] = ddc_cfg
+        core.save_config(self.config)
+        if state:
+            self.toast(
+                "Brilho por mapa ativado; defina níveis com "
+                "“multilut-ctl brightness set <mapa> <0-100>”."
+                if extra.ddcutil_binary()
+                else "Ativado, mas o ddcutil não está instalado "
+                "(Solus: sudo eopkg it ddcutil).",
+                7,
+            )
+        else:
+            self.toast("Brilho por mapa desativado.")
         return False
 
     def on_autostart_changed(self, switch, state: bool) -> bool:
