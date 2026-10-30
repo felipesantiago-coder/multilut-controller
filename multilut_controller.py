@@ -363,8 +363,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         if not isinstance(window_state, dict):
             window_state = {}
         start_w, start_h = self._fit_size_to_monitor(
-            int(window_state.get("width") or 1040),
-            int(window_state.get("height") or 700),
+            int(window_state.get("width") or extra.WINDOW_DEFAULT_W),
+            int(window_state.get("height") or extra.WINDOW_DEFAULT_H),
         )
         self.set_default_size(start_w, start_h)
         self.connect("close-request", self.on_close_request)
@@ -476,19 +476,21 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         paned.set_start_child(self.build_sidebar())
         paned.set_end_child(self.build_detail())
 
-        page_profiles = self.view_stack.add_titled(paned, "profiles", "Perfis")
+        page_profiles = self.view_stack.add_titled(
+            self._wrap_scrolled(paned), "profiles", "Perfis"
+        )
         page_profiles.set_icon_name("view-grid-symbolic")
         self._page_profiles = page_profiles
         page_atlas = self.view_stack.add_titled(
-            self.build_atlas_page(), "atlas", "Atlas"
+            self._wrap_scrolled(self.build_atlas_page()), "atlas", "Atlas"
         )
         page_atlas.set_icon_name("image-x-generic-symbolic")
         page_history = self.view_stack.add_titled(
-            self.build_history_page(), "history", "Histórico"
+            self._wrap_scrolled(self.build_history_page()), "history", "Histórico"
         )
         page_history.set_icon_name("document-open-recent-symbolic")
         page_system = self.view_stack.add_titled(
-            self.build_system_page(), "system", "Sistema"
+            self._wrap_scrolled(self.build_system_page()), "system", "Sistema"
         )
         page_system.set_icon_name("emblem-system-symbolic")
         self.view_stack.connect("notify::visible-child", self.on_visible_page_changed)
@@ -511,6 +513,21 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self._register_global_shortcut()
 
     # ------------------------------------------------------------ adaptação à tela
+    def _wrap_scrolled(self, child: Gtk.Widget) -> Gtk.ScrolledWindow:
+        """Envolve o conteúdo de uma aba em rolagem vertical.
+
+        Com a tela de referência 1366x768 (área útil ~640-700px), o
+        conteúdo de algumas abas excede a altura da janela; sem este
+        envelope o que fica embaixo é cortado e não há barra de rolagem.
+        A rolagem horizontal fica desativada (o conteúdo já se adapta
+        à largura) e a vertical é automática, só aparece quando precisa.
+        """
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        child.set_vexpand(True)
+        scroller.set_child(child)
+        return scroller
+
     def _fit_size_to_monitor(self, width: int, height: int) -> tuple[int, int]:
         """Limita o tamanho pedido à área útil do monitor (pontos lógicos).
 
@@ -518,8 +535,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         já vem em pontos lógicos, então o limite funciona igual em telas
         normais e com escala fracionária.
         """
-        min_w, min_h = 420, 400
-        width, height = max(min_w, width), max(min_h, height)
+        min_w, min_h = extra.WINDOW_MIN_W, extra.WINDOW_MIN_H
+        width, height = extra.clamp_window_size(width, height)
         display = Gdk.Display.get_default()
         if display is None:
             return width, height
@@ -2586,7 +2603,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         install_title = Gtk.Label(label="Instalação do jogo", xalign=0)
         install_title.set_hexpand(True)
         self.install_dropdown = Gtk.DropDown()
-        self.install_dropdown.set_size_request(420, -1)
+        # largura responsiva: preenche o espaço ao lado do título sem fixar
+        # um mínimo que estouraria janelas estreitas (antes era 420px fixos)
+        self.install_dropdown.set_size_request(280, -1)
+        self.install_dropdown.set_hexpand(True)
         self.install_dropdown.connect("notify::selected", self.on_install_selected)
         install_box.append(install_title)
         install_box.append(self.install_dropdown)

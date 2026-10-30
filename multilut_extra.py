@@ -24,6 +24,27 @@ from pathlib import Path
 import multilut_core as core
 
 
+# ------------------------------------------------------------ geometria da janela
+# Tela de referência: 1366x768 (área útil ~640-700px de altura com painéis).
+# O teto lógico (1150x700) garante que a janela principal e os estados
+# salvos de monitores maiores nunca abram fora de uma tela 1366x768.
+WINDOW_MIN_W, WINDOW_MIN_H = 420, 400
+WINDOW_MAX_W, WINDOW_MAX_H = 1150, 700
+WINDOW_DEFAULT_W, WINDOW_DEFAULT_H = 1100, 680
+
+
+def clamp_window_size(width: int, height: int) -> tuple[int, int]:
+    """Limita o tamanho lógico da janela entre o mínimo e o teto de 1150x700.
+
+    Aplicado antes do clamp de monitor (92% da área útil) em
+    ``_fit_size_to_monitor``: estados salvos de telas maiores são reduzidos
+    para caber na referência 1366x768 sem depender de geometria do GDK.
+    """
+    width = max(WINDOW_MIN_W, min(WINDOW_MAX_W, int(width)))
+    height = max(WINDOW_MIN_H, min(WINDOW_MAX_H, int(height)))
+    return width, height
+
+
 # ------------------------------------------------------------ opção do Steam
 def find_localconfig_files(roots: list[Path] | None = None) -> list[Path]:
     """Arquivos localconfig.vdf do Steam que guardam LaunchOptions.
