@@ -13,6 +13,7 @@ import struct
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unicodedata
 import urllib.error
@@ -21,10 +22,14 @@ from typing import Iterable
 
 
 APP_ID = "com.felipesantiago.MultiLUTController"
-APP_VERSION = "1.8.0"
-RELEASES_API_URL = (
-    "https://api.github.com/repos/felipesantiago-coder/multilut-controller/releases/latest"
-)
+APP_VERSION = "1.9.0"
+REPO_OWNER = "felipesantiago-coder"
+REPO_NAME = "multilut-controller"
+REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
+RELEASES_API_URL = f"{REPO_URL}/releases/latest"
+COMMITS_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/commits/main"
+TARBALL_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/archive/refs/heads/main.tar.gz"
+RAW_CORE_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/multilut_core.py"
 STEAM_APP_ID = "222880"
 PROFILE_PATTERN = re.compile(
     r"^(?P<indent>[ \t]*)#define[ \t]+ACTIVE_LUT_PROFILE[ \t]+"
@@ -492,27 +497,89 @@ def compare_versions(candidate: str, current: str) -> bool:
     return left > right
 
 
-def fetch_latest_release(timeout: float = 6.0) -> dict | None:
-    """Consulta a release mais recente no GitHub; None em qualquer falha."""
+def _http_get(url: str, timeout: float = 6.0) -> bytes | None:
+    """GET simples com User-Agent do app; None em qualquer falha de rede."""
     request = urllib.request.Request(
-        RELEASES_API_URL,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "MultiLUTController/" + APP_VERSION,
-        },
+        url,
+        headers={"User-Agent": "MultiLUTController/" + APP_VERSION},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            return response.read()
     except (OSError, ValueError, urllib.error.URLError, UnicodeError):
         return None
-    if not isinstance(data, dict) or not data.get("tag_name"):
+
+
+def fetch_latest_release(timeout: float = 6.0) -> dict | None:
+    """Consulta a release mais recente no GitHub; None quando não há release."""
+    data = _http_get(RELEASES_API_URL, timeout=timeout)
+    if data is None:
+        return None
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        return None
+    if not isinstance(payload, dict) or not payload.get("tag_name"):
         return None
     return {
-        "tag": str(data["tag_name"]),
-        "name": str(data.get("name") or data["tag_name"]),
-        "url": str(data.get("html_url") or ""),
+        "tag": str(payload["tag_name"]),
+        "name": str(payload.get("name") or payload["tag_name"]),
+        "url": str(payload.get("html_url") or ""),
     }
+
+
+def fetch_latest_commit(timeout: float = 6.0) -> dict | None:
+    """Consulta o commit mais recente do main na API do GitHub.
+
+    O repositório não publica releases, então o main é a fonte da verdade.
+    Retorna {"sha", "date", "message"}; None em qualquer falha (inclusive
+    404 de repositorio vazio e 403 de limite de requisicoes).
+    """
+    data = _http_get(COMMITS_API_URL, timeout=timeout)
+    if data is None:
+        return None
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        return None
+    if not isinstance(payload, dict) or not payload.get("sha"):
+        return None
+    commit = payload.get("commit") or {}
+    message = str(commit.get("message") or "").splitlines()[0] if commit else ""
+    date = str(((commit.get("committer") or {}).get("date")) or "")
+    return {"sha": str(payload["sha"]), "date": date, "message": message}
+
+
+def fetch_remote_app_version(timeout: float = 6.0) -> str | None:
+    """Lê APP_VERSION do multilut_core.py publicado no main (raw, sem API)."""
+    data = _http_get(RAW_CORE_URL, timeout=timeout)
+    if data is None:
+        return None
+    head = data[:8192].decode("utf-8", errors="ignore")
+    match = re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', head, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def installed_commit(repo: Path | None = None) -> str | None:
+    """Commit de origem da instalação: HEAD do git ou o arquivo source_commit.
+
+    Instalações feitas por install.sh gravam `source_commit` (quando a origem
+    era um clone) e o próprio atualizador regrava o arquivo após cada
+    atualização por tarball.
+    """
+    repo = repo or app_repo_dir()
+    head = local_git_head(repo)
+    if head is not None:
+        return head
+    marker = repo / "source_commit"
+    try:
+        text = marker.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    first = text.splitlines()[0].strip()
+    return first or None
 
 
 def app_repo_dir() -> Path:
@@ -562,24 +629,83 @@ def git_remote_head(repo: Path | None = None, timeout: float = 10.0) -> str | No
     return None
 
 
-def apply_update(repo: Path | None = None, timeout: float = 90.0) -> dict:
-    """Atualiza o aplicativo com `git pull --ff-only`; nunca derruba alterações.
+def check_for_updates(repo: Path | None = None, timeout: float = 6.0) -> dict:
+    """Decide se há versão nova no repositório, com ou sem release publicada.
 
-    Retorna {"ok": bool, "message": str, "old_head": str|None, "new_head": str|None}.
-    Instalações sem git (download .zip) recebem instrução manual.
+    Ordem de verificação (a primeira resposta vence):
+      1. Release publicada com tag mais nova que APP_VERSION;
+      2. Commit do main diferente do commit instalado (git clone via
+         ls-remote sem limite de API; demais instalações via API de commits
+         ou marker source_commit);
+      3. Sinal alternativo sem API: APP_VERSION do main publicado em
+         raw.githubusercontent comparado com a versão local.
+
+    Retorna {"status": "available"|"current"|"unknown", "local", "remote",
+    "release", "message", "commit_message"}.
+    """
+    result = {
+        "status": "unknown",
+        "local": None,
+        "remote": None,
+        "release": None,
+        "message": "Não foi possível verificar atualizações agora.",
+        "commit_message": "",
+    }
+    local = installed_commit(repo)
+    result["local"] = local
+    remote: str | None
+    if local_git_head(repo or app_repo_dir()) is not None:
+        # Clone git: ls-remote não sofre limite de requisições da API.
+        remote = git_remote_head(repo)
+        remote_commit = None
+    else:
+        remote_commit = fetch_latest_commit(timeout=timeout)
+        remote = remote_commit["sha"] if remote_commit else None
+    result["remote"] = remote
+
+    release = fetch_latest_release(timeout=timeout)
+    result["release"] = release
+    if release is not None and compare_versions(release["tag"], APP_VERSION):
+        result["status"] = "available"
+        result["message"] = f"Release {release['tag']} disponível."
+        return result
+
+    if local and remote:
+        if remote.startswith(local[:12]):
+            result["status"] = "current"
+            result["message"] = "Você já está na versão mais recente."
+        else:
+            result["status"] = "available"
+            result["message"] = f"Commits novos no main ({remote[:7]})."
+            if remote_commit:
+                result["commit_message"] = remote_commit.get("message", "")
+        return result
+
+    # Sem comparação de commit possível (instalação sem marker, ou API de
+    # commits indisponível): sinal alternativo — APP_VERSION publicado no
+    # main via raw.githubusercontent, que não sofre limite de requisições.
+    remote_version = fetch_remote_app_version(timeout=timeout)
+    if remote_version is not None and compare_versions(remote_version, APP_VERSION):
+        result["status"] = "available"
+        result["message"] = f"Versão {remote_version} disponível no repositório."
+        return result
+    if remote_version is not None and not local:
+        result["status"] = "current"
+        result["message"] = "Você já está na versão mais recente."
+    return result
+
+
+def apply_update(repo: Path | None = None, timeout: float = 90.0) -> dict:
+    """Atualiza o aplicativo para o main mais recente do repositório.
+
+    Em checkouts git usa `git pull --ff-only` (nunca derruba alterações);
+    em instalações copiadas por install.sh baixa o tarball do main e roda
+    o install.sh novo. Retorna {"ok", "message", "old_head", "new_head"}.
     """
     repo = repo or app_repo_dir()
     old_head = local_git_head(repo)
     if old_head is None:
-        return {
-            "ok": False,
-            "message": (
-                "Esta instalação não é um checkout git; baixe a versão nova em "
-                "https://github.com/felipesantiago-coder/multilut-controller/releases"
-            ),
-            "old_head": None,
-            "new_head": None,
-        }
+        return apply_update_tarball(timeout=timeout)
     try:
         out = subprocess.run(
             ["git", "-C", str(repo), "pull", "--ff-only"],
@@ -613,6 +739,98 @@ def apply_update(repo: Path | None = None, timeout: float = 90.0) -> dict:
     return {
         "ok": True,
         "message": f"Atualizado: {old_head} -> {new_head}. Reinicie o aplicativo.",
+        "old_head": old_head,
+        "new_head": new_head,
+    }
+
+
+def _extract_tarball_safe(archive: Path, destination: Path) -> None:
+    """Extrai um tar.gz rejeitando caminhos suspeitos (../, absolutos)."""
+    with tarfile.open(archive, "r:gz") as tar:
+        base = destination.resolve()
+        for member in tar.getmembers():
+            candidate = (base / member.name).resolve()
+            if base != candidate and base not in candidate.parents:
+                raise ValueError(f"caminho suspeito no pacote: {member.name}")
+        try:
+            tar.extractall(destination, filter="data")
+        except TypeError:  # Python antigo sem o parâmetro filter
+            tar.extractall(destination)
+
+
+def apply_update_tarball(timeout: float = 120.0) -> dict:
+    """Atualiza instalações sem git: baixa o main.tar.gz e roda install.sh.
+
+    Grava `source_commit` na instalação para as próximas verificações
+    saberem em que commit o código está.
+    """
+    old_head = installed_commit()
+    commit = fetch_latest_commit(timeout=15.0) or {}
+    sha = str(commit.get("sha") or "")
+    workdir = Path(tempfile.mkdtemp(prefix="multilut-update-"))
+    try:
+        data = _http_get(TARBALL_URL, timeout=timeout)
+        if data is None:
+            return {
+                "ok": False,
+                "message": "Não foi possível baixar o pacote do repositório.",
+                "old_head": old_head,
+                "new_head": None,
+            }
+        archive = workdir / "main.tar.gz"
+        archive.write_bytes(data)
+        source = workdir / "src"
+        source.mkdir()
+        try:
+            _extract_tarball_safe(archive, source)
+        except (tarfile.TarError, ValueError) as exc:
+            return {
+                "ok": False,
+                "message": f"Pacote inválido: {exc}",
+                "old_head": old_head,
+                "new_head": None,
+            }
+        entries = sorted(p for p in source.iterdir() if p.is_dir())
+        if not entries:
+            return {
+                "ok": False,
+                "message": "Pacote do repositório veio vazio.",
+                "old_head": old_head,
+                "new_head": None,
+            }
+        root = entries[0]
+        if sha:
+            (root / "source_commit").write_text(sha + "\n", encoding="utf-8")
+        try:
+            out = subprocess.run(
+                ["bash", "install.sh"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {
+                "ok": False,
+                "message": f"install.sh falhou: {exc}",
+                "old_head": old_head,
+                "new_head": sha[:7] or None,
+            }
+        if out.returncode != 0:
+            detail = (out.stderr or out.stdout or "").strip().splitlines()
+            message = detail[-1] if detail else "install.sh retornou erro."
+            return {
+                "ok": False,
+                "message": message,
+                "old_head": old_head,
+                "new_head": sha[:7] or None,
+            }
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    new_head = sha[:7] if sha else None
+    return {
+        "ok": True,
+        "message": f"Atualizado para {new_head or 'main'}. Reinicie o aplicativo.",
         "old_head": old_head,
         "new_head": new_head,
     }

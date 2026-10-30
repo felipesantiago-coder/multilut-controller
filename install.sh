@@ -27,6 +27,15 @@ cp -a "$SOURCE_DIR/." "$APP_DIR/"
 chmod 755 "$APP_DIR/run.sh" "$APP_DIR/install.sh" "$APP_DIR/uninstall.sh"
 chmod 644 "$APP_DIR/multilut_controller.py" "$APP_DIR/multilut_core.py" "$APP_DIR/multilut_extra.py" "$APP_DIR/multilut_ctl.py" "$APP_DIR/multilut_daemon.py" "$APP_DIR/multilut_preview.py" "$APP_DIR/multilut_atlas.py" "$APP_DIR/multilut_tray.py"
 
+# Marcações para o verificador de atualizações: de qual commit veio este
+# código e quando a instalação foi feita (falls back do comparador).
+if [ -d "$SOURCE_DIR/.git" ]; then
+  git -C "$SOURCE_DIR" rev-parse HEAD > "$APP_DIR/source_commit" 2>/dev/null || true
+elif [ -f "$SOURCE_DIR/source_commit" ]; then
+  cp "$SOURCE_DIR/source_commit" "$APP_DIR/source_commit"
+fi
+date -u +%s > "$APP_DIR/install_stamp"
+
 BIN_DIR="$DATA_ROOT/bin"
 mkdir -p "$BIN_DIR"
 cp "$SOURCE_DIR/multilut_ctl.py" "$BIN_DIR/multilut-ctl"

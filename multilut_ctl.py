@@ -18,7 +18,7 @@ Uso:
   multilut-ctl daemon status|start|stop|install|uninstall
                                        Piloto automático como serviço sem janela
   multilut-ctl autostart on|off|status Inicia o app com a sessão (janela oculta)
-  multilut-ctl update check|apply      Verifica/aplica atualização via git
+  multilut-ctl update check|apply      Verifica/aplica atualização do repositório
 
 Opções comuns:
   --shader CAMINHO    Shader .fx alternativo (padrão: config ou candidato)
@@ -289,29 +289,19 @@ def cmd_autostart(args: argparse.Namespace) -> int:
 
 
 def cmd_update(args: argparse.Namespace) -> int:
-    """Verifica ou aplica a atualização do aplicativo (instalação via git)."""
+    """Verifica ou aplica a atualização (git ou instalação por install.sh)."""
     if args.acao == "check":
-        local = core.local_git_head() or "sem git"
+        result = core.check_for_updates()
+        local = result.get("local") or "sem git e sem marcação"
         print(f"versão instalada: v{core.APP_VERSION} ({local})")
-        release = core.fetch_latest_release()
-        if release is None:
-            remote = core.git_remote_head()
-            if remote is None:
-                print("Não foi possível consultar o GitHub agora.")
-                return 2
-            print("Sem release publicada; comparando commit do main...")
-            print(f"main remoto: {remote[:7]}")
-            if core.local_git_head() and remote.startswith(core.local_git_head()):
-                print("Você já está no main mais recente.")
-            else:
-                print("Há commits novos no main; use multilut-ctl update apply.")
-            return 0
-        if core.compare_versions(release["tag"], core.APP_VERSION):
-            print(f"Atualização disponível: {release['tag']} — {release['url']}")
+        print(result["message"])
+        if result["status"] == "available":
             print("Aplique com multilut-ctl update apply.")
             return 1
-        print("Você já está na versão mais recente.")
-        return 0
+        if result["status"] == "current":
+            return 0
+        print("Verifique sua conexão e tente novamente.")
+        return 2
     result = core.apply_update()
     print(result["message"])
     return 0 if result["ok"] else 1
@@ -767,7 +757,7 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser = subparsers.add_parser(
         "update",
         parents=[common],
-        help="verifica ou aplica atualização do aplicativo via git",
+        help="verifica ou aplica atualização do repositório",
     )
     update_parser.add_argument(
         "acao", choices=("check", "apply"), help="check consulta; apply atualiza"

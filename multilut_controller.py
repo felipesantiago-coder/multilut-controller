@@ -3016,37 +3016,53 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         return GLib.SOURCE_REMOVE
 
     def _updates_thread(self) -> None:
-        release = core.fetch_latest_release()
-        if release is not None:
-            GLib.idle_add(self._announce_update, release)
+        result = core.check_for_updates()
+        GLib.idle_add(self._announce_update, result)
 
-    def _announce_update(self, release: dict) -> bool:
-        if not core.compare_versions(release["tag"], core.APP_VERSION):
+    def _announce_update(self, result: dict) -> bool:
+        status = result.get("status")
+        if status == "current":
             if self._update_requested:
                 self.toast(f"Você já está na versão mais recente (v{core.APP_VERSION}).")
             return GLib.SOURCE_REMOVE
+        if status != "available":
+            if self._update_requested:
+                self.toast(
+                    "Não foi possível verificar atualizações "
+                    "(GitHub inacessível ou limite de requisições).", 8,
+                )
+            return GLib.SOURCE_REMOVE
+        remote = str(result.get("remote") or "")[:7] or "main"
+        release = result.get("release") or {
+            "tag": remote,
+            "name": result.get("commit_message") or "Commits novos no repositório",
+            "url": core.REPO_URL,
+        }
         self._pending_release = release
+        local_note = str(result.get("local") or f"v{core.APP_VERSION}")
         self.update_label.set_label(
-            f"MultiLUT Controller v{core.APP_VERSION} — {release['tag']} disponível"
+            f"MultiLUT Controller ({local_note}) — {remote} disponível"
         )
         if hasattr(self, "update_apply_button"):
             self.update_apply_button.set_visible(True)
-        self.toast(f"Atualização disponível: {release['tag']}", 8)
+        self.toast(f"Atualização disponível: {remote}", 8)
         self.show_update_dialog(release)
         return GLib.SOURCE_REMOVE
 
     # ------------------------------------------------------------ aplicação da atualização
     def show_update_dialog(self, release: dict) -> None:
-        """Diálogo com botão de atualização direta (git) e link para o GitHub."""
+        """Diálogo com botão de atualização direta e link para o GitHub."""
         if not hasattr(Adw, "MessageDialog"):
             return
         notes = str(release.get("name") or "").strip()
+        tag = str(release.get("tag") or "main")
         body = (
             f"Versão instalada: v{core.APP_VERSION}.\n"
-            + (f"{notes}\n\n" if notes and notes != release["tag"] else "\n")
-            + "A atualização usa git (pull sem forçar) e o app oferece reiniciar."
+            + (f"{notes}\n\n" if notes and notes != tag else "\n")
+            + "Em clones git o app faz pull; nas demais instalações baixa o "
+            + "código novo do repositório e reinstala sozinho."
         )
-        dialog = Adw.MessageDialog.new(self, f"Atualização {release['tag']} disponível", body)
+        dialog = Adw.MessageDialog.new(self, f"Atualização {tag} disponível", body)
         dialog.add_response("later", "Depois")
         if release.get("url"):
             dialog.add_response("site", "Ver no GitHub")
@@ -3067,7 +3083,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
     def _start_update_apply(self) -> None:
         if hasattr(self, "update_apply_button"):
             self.update_apply_button.set_sensitive(False)
-        self.toast("Atualizando via git…")
+        self.toast("Atualizando do repositório…")
         threading.Thread(target=self._update_apply_thread, daemon=True).start()
 
     def _update_apply_thread(self) -> None:

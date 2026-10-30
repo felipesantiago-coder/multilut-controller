@@ -264,11 +264,13 @@ class UpdateHelperTests(Lote4TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(core.git_remote_head(Path(tmp), timeout=4.0))
 
-    def test_apply_update_sem_git_orienta_download(self):
+    def test_apply_update_sem_git_delega_para_tarball(self):
         with tempfile.TemporaryDirectory() as tmp:
-            result = core.apply_update(repo=Path(tmp))
-            self.assertFalse(result["ok"])
-            self.assertIn("releases", result["message"])
+            stub = {"ok": True, "message": "ok", "old_head": None, "new_head": "abc"}
+            with mock.patch.object(core, "apply_update_tarball", return_value=stub) as tar:
+                result = core.apply_update(repo=Path(tmp))
+            self.assertEqual(result, stub)
+            tar.assert_called_once()
 
     def test_apply_update_em_repo_sem_remoto(self):
         with tempfile.TemporaryDirectory() as tmp:
