@@ -209,6 +209,13 @@ AUTOMACAO E INTEGRACAO
   vkBasalt, atlas, piloto, daemon...) e solucao de problemas comuns
   (piloto nao troca, console.log ausente, shader invalido, atlas errado,
   simulacao indisponivel).
+- Icone na bandeja: com libayatana-appindicator (Solus: sudo eopkg it
+  libayatana-appindicator-gtk3; no GNOME, ative a extensao AppIndicator), o
+  app mostra um icone com menu rapido: perfis recentes, proximo/anterior,
+  pausar/retomar o piloto, abrir janela e sair. Com a bandeja ativa, fechar
+  a janela oculta o app (continua trocando perfis); desligue "Continuar
+  rodando na bandeja" na pagina Sistema para fechar de verdade. Interruptor
+  na pagina Sistema liga/desliga o icone na hora.
 
 PAGINA SISTEMA
 --------------
@@ -390,6 +397,16 @@ ATLAS DO PERFIL E DIAGNOSTICO EXTRAS
 - A aba Sistema traz a linha "vkBasalt.conf (effects)", que verifica se
   os efeitos configurados incluem o MultiLUT.
 - O botao de informacao no cabecalho abre a janela Sobre do aplicativo.
+- Substituicao por LUT externa: a aba Atlas aceita .cube E .3dl
+  (Autodesk/Lustre); a ordem dos eixos do .3dl (vermelho ou azul variando
+  primeiro) e detectada automaticamente e os valores inteiros sao
+  normalizados pela maior entrada.
+- Gerador de LUT: na aba Atlas, ajuste brilho, contraste, saturacao e
+  temperatura com sliders; a pre-visualizacao aplica os ajustes numa
+  imagem de referencia sua (ou mostra a faixa gerada) e "Salvar na linha
+  selecionada" grava a LUT gerada no atlas com backup. Apenas efeitos de
+  cor pontuais sao encodaveis numa LUT 3D — vinheta/nitidez ficam de fora
+  por design.
 
 VALIDACAO
 ---------

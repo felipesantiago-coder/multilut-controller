@@ -158,6 +158,121 @@ def parse_cube_file(path: Path | str) -> dict:
 
 
 # --------------------------------------------------------------------------
+# Parser .3dl (Autodesk/Lustre)
+# --------------------------------------------------------------------------
+_3DL_SIZE_RE = re.compile(r"^\s*LUT_3D_INPUT_SIZE\s+(\d+)\s*$", re.IGNORECASE)
+
+
+def detect_axis_order(values: list[tuple[float, float, float]], size: int) -> str:
+    """"red-fastest" (.cube) ou "blue-fastest" (Lustre .3dl) pela 2ª entrada.
+
+    Numa LUT identidade a 2ª linha é (1/(N-1), 0, 0) quando o vermelho varia
+    mais rápido e (0, 0, 1/(N-1)) quando é o azul; LUTs reais mantêm a ordem
+    do formato de origem, então as primeiras linhas revelam o caso.
+    """
+    for row in values[1 : min(6, len(values))]:
+        red, green, blue = row
+        if red > 0.0 and green == 0.0 and blue == 0.0:
+            return "red-fastest"
+        if blue > 0.0 and red == 0.0 and green == 0.0:
+            return "blue-fastest"
+    return "blue-fastest"  # convenção do formato .3dl
+
+
+def parse_3dl_text(text: str, source: str = "") -> dict:
+    """Lê uma LUT 3D .3dl (Autodesk/Lustre) e devolve a tabela em [0, 1].
+
+    Valores inteiros (0-255, 0-1023, 0-4095… ou decimais) são normalizados
+    pelo maior valor presente na tabela. A ordem dos eixos (vermelho ou azul
+    variando mais rápido) é detectada automaticamente; a saída usa a MESMA
+    convenção do parser .cube: ndarray (N, N, N, 3) indexado [b, g, r].
+    """
+    if np is None:
+        raise AtlasError(
+            "Importação de LUT requer numpy e Pillow "
+            "(no Solus: sudo eopkg it numpy python-pillow)."
+        )
+    label = f" ({source})" if source else ""
+    size: int | None = None
+    title: str | None = None
+    values: list[tuple[float, float, float]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        lowered = line.lower()
+        if lowered.startswith("title"):
+            title = line[5:].strip().strip('"')
+            continue
+        size_match = _3DL_SIZE_RE.match(line)
+        if size_match:
+            size = int(size_match.group(1))
+            continue
+        if lowered.startswith(("lut_1d", "input_", "output_", "range_")):
+            continue
+        numbers = _FLOAT_RE.findall(line)
+        if len(numbers) != 3:
+            raise AtlasError(f"Linha não reconhecida no .3dl{label}: {line!r}")
+        try:
+            values.append(tuple(float(item) for item in numbers))
+        except ValueError as exc:
+            raise AtlasError(f"Valor inválido no .3dl{label}: {line!r}") from exc
+
+    if size is None:
+        raise AtlasError(
+            f"O arquivo .3dl{label} não declara LUT_3D_INPUT_SIZE."
+        )
+    if not 2 <= size <= MAX_CUBE_SIZE:
+        raise AtlasError(
+            f"LUT_3D_INPUT_SIZE fora do intervalo suportado (2 a {MAX_CUBE_SIZE}): {size}."
+        )
+    expected = size ** 3
+    if len(values) != expected:
+        raise AtlasError(
+            f"Tabela do .3dl{label} incompleta: {len(values)} de "
+            f"{expected} entradas (LUT_3D_INPUT_SIZE {size})."
+        )
+    max_value = max(max(row) for row in values)
+    scale = max_value if max_value > 0 else 1.0
+    normalized = [
+        (component / scale for component in row) for row in values
+    ]
+    normalized = [tuple(row) for row in normalized]
+    order = detect_axis_order(normalized, size)
+    if order == "red-fastest":
+        table = np.asarray(normalized, dtype=np.float32).reshape(size, size, size, 3)
+    else:
+        raw = np.asarray(normalized, dtype=np.float32).reshape(size, size, size, 3)
+        table = np.transpose(raw, (2, 1, 0, 3))  # [r,g,b,c] -> [b,g,r,c]
+    return {
+        "size": size,
+        "table": np.clip(table, 0.0, 1.0).astype(np.float32),
+        "title": title,
+        "input_range": (0.0, 1.0),
+        "format": "3dl",
+        "order": order,
+    }
+
+
+def parse_lut_file(path: Path | str) -> dict:
+    """Lê .cube ou .3dl (pela extensão; .3dl detecta a ordem dos eixos)."""
+    target = Path(path)
+    suffix = target.suffix.lower()
+    try:
+        text = target.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        raise AtlasError(f"Não foi possível abrir a LUT: {target}") from exc
+    if suffix == ".3dl":
+        return parse_3dl_text(text, source=target.name)
+    if suffix == ".cube":
+        return parse_cube_text(text, source=target.name)
+    raise AtlasError(
+        f"Formato de LUT não suportado ({suffix or 'sem extensão'}); "
+        "use .cube ou .3dl."
+    )
+
+
+# --------------------------------------------------------------------------
 # Reamostragem e codificação no layout do atlas
 # --------------------------------------------------------------------------
 def _trilinear(table: "np.ndarray", r: "np.ndarray", g: "np.ndarray", b: "np.ndarray"):
@@ -300,17 +415,16 @@ def save_atlas_atomic(
             temporary.unlink()
 
 
-def override_row_with_cube(
+def override_row_with_strip(
     atlas_path: Path | str,
     row: int,
-    cube_path: Path | str,
+    strip: "Image.Image",
     make_backup: bool = True,
+    source: str = "",
 ) -> dict:
-    """Substitui a linha do atlas pela LUT do .cube (com backup e verificação)."""
+    """Grava uma faixa 1024x32 pronta na linha do atlas (com backup)."""
     row = validate_row(row)
-    cube = parse_cube_file(cube_path)
     atlas = load_atlas_image(atlas_path)
-    strip = strip_image_from_cube(cube)
     replaced = atlas_with_replaced_row(atlas, row, strip)
     save_atlas_atomic(replaced, atlas_path, make_backup=make_backup)
     valid, message = core.validate_texture(atlas_path)
@@ -319,13 +433,34 @@ def override_row_with_cube(
     return {
         "row": row,
         "atlas": str(atlas_path),
-        "cube": str(cube_path),
-        "cube_size": cube["size"],
-        "cube_title": cube["title"],
+        "source": source,
         "backup": str(core.backup_path(atlas_path))
         if make_backup and Path(atlas_path).exists()
         else None,
     }
+
+
+def override_row_with_cube(
+    atlas_path: Path | str,
+    row: int,
+    cube_path: Path | str,
+    make_backup: bool = True,
+) -> dict:
+    """Substitui a linha do atlas pela LUT do .cube/.3dl (backup e verificação)."""
+    row = validate_row(row)
+    lut = parse_lut_file(cube_path)
+    strip = strip_image_from_cube(lut)
+    info = override_row_with_strip(
+        atlas_path,
+        row,
+        strip,
+        make_backup=make_backup,
+        source=Path(cube_path).name,
+    )
+    info["cube"] = str(cube_path)
+    info["cube_size"] = lut["size"]
+    info["cube_title"] = lut["title"]
+    return info
 
 
 def restore_row_from_bundle(
@@ -557,3 +692,82 @@ def row_owner_profiles(mapping: dict[int, int]) -> dict[int, list[int]]:
         if 0 <= row < ATLAS_ROWS:
             owners[row].append(profile_id)
     return owners
+
+
+# --------------------------------------------------------------------------
+# Gerador de LUT (ajustes básicos gravados como LUT da linha)
+# --------------------------------------------------------------------------
+LUT_GENERATOR_DEFAULTS = {
+    "brightness": 0.0,
+    "contrast": 1.0,
+    "saturation": 1.0,
+    "temperature": 0.0,
+}
+
+
+def identity_table(size: int = ATLAS_TILE) -> "np.ndarray":
+    """LUT identidade (N, N, N, 3) indexada [b, g, r]: saída = entrada."""
+    axis = np.linspace(0.0, 1.0, size, dtype=np.float32)
+    red = np.broadcast_to(axis[None, None, :], (size, size, size))
+    green = np.broadcast_to(axis[None, :, None], (size, size, size))
+    blue = np.broadcast_to(axis[:, None, None], (size, size, size))
+    return np.stack((red, green, blue), axis=-1).astype(np.float32)
+
+
+def apply_lut_params(
+    table: "np.ndarray",
+    brightness: float = 0.0,
+    contrast: float = 1.0,
+    saturation: float = 1.0,
+    temperature: float = 0.0,
+) -> "np.ndarray":
+    """Ajustes básicos sobre uma tabela (…, 3) em [0, 1], encodáveis em LUT 3D.
+
+    Apenas transformações pontuais de cor entram aqui (temperatura,
+    saturação, brilho, contraste); efeitos espaciais (vinheta, nitidez) não
+    são representáveis numa LUT 3D e ficam de fora do gerador por design.
+    """
+    arr = np.asarray(table, dtype=np.float32)
+    if temperature:
+        shift = np.array(
+            [temperature * 0.10, 0.0, -temperature * 0.10], dtype=np.float32
+        )
+        arr = arr + shift
+    if saturation != 1.0:
+        luma = (
+            arr[..., 0] * 0.2126 + arr[..., 1] * 0.7152 + arr[..., 2] * 0.0722
+        )[..., None]
+        arr = luma + (arr - luma) * float(saturation)
+    if brightness:
+        arr = arr + float(brightness)
+    if contrast != 1.0:
+        arr = (arr - 0.5) * float(contrast) + 0.5
+    return np.clip(arr, 0.0, 1.0).astype(np.float32)
+
+
+def generate_lut_image(
+    brightness: float = 0.0,
+    contrast: float = 1.0,
+    saturation: float = 1.0,
+    temperature: float = 0.0,
+    size: int = ATLAS_TILE,
+) -> "Image.Image":
+    """Faixa 1024x32 do atlas com os ajustes aplicados à LUT identidade."""
+    table = apply_lut_params(
+        identity_table(size), brightness, contrast, saturation, temperature
+    )
+    return strip_image_from_cube({"size": size, "table": table})
+
+
+def apply_params_to_image(
+    image: "Image.Image",
+    brightness: float = 0.0,
+    contrast: float = 1.0,
+    saturation: float = 1.0,
+    temperature: float = 0.0,
+) -> "Image.Image":
+    """Pré-visualização: os mesmos ajustes do gerador sobre uma imagem RGB."""
+    arr = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    out = apply_lut_params(arr, brightness, contrast, saturation, temperature)
+    pixels = (out * 255.0 + 0.5).astype(np.uint8)
+    return Image.fromarray(pixels, "RGB")

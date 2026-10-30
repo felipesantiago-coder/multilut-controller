@@ -31,6 +31,7 @@ import multilut_atlas as atlas
 import multilut_core as core
 import multilut_extra as extra
 import multilut_preview as preview
+import multilut_tray as tray
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -536,7 +537,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         return min(width, usable_w), min(height, usable_h)
 
     def on_close_request(self, _window) -> bool:
-        """Guarda o tamanho da janela para a próxima abertura."""
+        """Guarda o tamanho da janela; com bandeja ativa, oculta em vez de sair."""
         state = self.config.get("window")
         if not isinstance(state, dict):
             state = {}
@@ -547,6 +548,17 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             core.save_config(self.config)
         except (OSError, core.MultiLUTError):
             pass
+        application = self.get_application()
+        tray_icon = getattr(application, "_tray", None) if application else None
+        if (
+            tray_icon is not None
+            and bool(self.config.get("tray_hide_on_close", True))
+            and not bool(self.config.get("quit_on_close", False))
+        ):
+            # continua rodando (piloto/daemon/bandeja) com a janela oculta;
+            # Sair no menu da bandeja encerra de verdade
+            self.hide()
+            return True
         return False
 
     def _wrap_box(self, spacing: int, homogeneous: bool = False) -> Gtk.Widget:
@@ -1048,11 +1060,11 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         page.append(scroller)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        self.atlas_override_button = Gtk.Button(label="Substituir por .cube…")
+        self.atlas_override_button = Gtk.Button(label="Substituir por .cube/.3dl…")
         self.atlas_override_button.add_css_class("suggested-action")
         self.atlas_override_button.set_tooltip_text(
-            "Interpreta a LUT 3D do .cube, reamostra para 32³ e grava na linha "
-            "selecionada do atlas instalado (com backup)"
+            "Interpreta a LUT 3D do .cube ou .3dl, reamostra para 32³ e grava na "
+            "linha selecionada do atlas instalado (com backup)"
         )
         self.atlas_override_button.connect("clicked", self.on_atlas_override_clicked)
         self.atlas_restore_row_button = Gtk.Button(
@@ -1078,6 +1090,60 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         ):
             actions.append(button)
         page.append(actions)
+
+        # ------------------------------------------------ gerador de LUT (F12)
+        generator = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        generator.add_css_class("card")
+        generator_title = Gtk.Label(label="Gerador de LUT — ajustes básicos", xalign=0)
+        generator_title.add_css_class("section-title")
+        generator_help = Gtk.Label(
+            xalign=0,
+            wrap=True,
+            label=(
+                "Ajuste brilho, contraste, saturação e temperatura; a pré-"
+                "visualização mostra o resultado numa imagem sua (ou na própria "
+                "faixa gerada) e “Salvar na linha” grava a LUT gerada na linha "
+                "selecionada, com backup. Vinheta e nitidez são efeitos espaciais "
+                "e não cabem numa LUT 3D."
+            ),
+        )
+        generator_help.add_css_class("muted")
+        generator.append(generator_title)
+        generator.append(generator_help)
+
+        self._generator_reference = None
+        self._generator_updating = False
+        gen_row1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.generator_brightness = self._generator_scale("Brilho", -50, 50, 0)
+        self.generator_contrast = self._generator_scale("Contraste", 50, 150, 100)
+        gen_row1.append(self.generator_brightness[0])
+        gen_row1.append(self.generator_contrast[0])
+        gen_row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.generator_saturation = self._generator_scale("Saturação", 0, 200, 100)
+        self.generator_temperature = self._generator_scale("Temperatura", -100, 100, 0)
+        gen_row2.append(self.generator_saturation[0])
+        gen_row2.append(self.generator_temperature[0])
+        generator.append(gen_row1)
+        generator.append(gen_row2)
+
+        gen_controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.generator_image_button = Gtk.Button(label="Abrir imagem de referência…")
+        self.generator_image_button.connect(
+            "clicked", self.on_generator_open_image
+        )
+        self.generator_save_button = Gtk.Button(label="Salvar na linha selecionada…")
+        self.generator_save_button.add_css_class("suggested-action")
+        self.generator_save_button.connect("clicked", self.on_generator_save)
+        gen_controls.append(self.generator_image_button)
+        gen_controls.append(self.generator_save_button)
+        generator.append(gen_controls)
+
+        self.generator_picture = Gtk.Picture()
+        self.generator_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.generator_picture.set_size_request(-1, 150)
+        generator.append(self.generator_picture)
+        page.append(generator)
+        self._update_generator_preview()
 
         reindex_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         reindex_card.add_css_class("card")
@@ -1265,8 +1331,9 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         dialog = Gtk.FileDialog()
         filters = Gio.ListStore.new(Gtk.FileFilter)
         cube_filter = Gtk.FileFilter()
-        cube_filter.set_name("LUT 3D (.cube)")
+        cube_filter.set_name("LUT 3D (.cube/.3dl)")
         cube_filter.add_pattern("*.cube")
+        cube_filter.add_pattern("*.3dl")
         filters.append(cube_filter)
         all_filter = Gtk.FileFilter()
         all_filter.set_name("Todos os arquivos")
@@ -1296,6 +1363,131 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self._after_atlas_change(
             f"Linha {info['row']} substituída pela LUT “{Path(path).name}” "
             f"({info['cube_size']}³ reamostrada para 32³; backup gravado)."
+        )
+
+    # -------------------------------------------------------- gerador de LUT (F12)
+    def _generator_scale(self, label: str, lo: int, hi: int, value: int):
+        """Linha (rótulo + Gtk.Scale) do gerador; devolve (box, scale)."""
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title = Gtk.Label(label=label, xalign=0)
+        title.set_size_request(96, -1)
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, 1)
+        scale.set_value(value)
+        scale.set_size_request(220, -1)
+        scale.connect("value-changed", self.on_generator_changed)
+        box.append(title)
+        box.append(scale)
+        return box, scale
+
+    def _generator_params(self) -> dict:
+        """Parâmetros atuais dos sliders, nas unidades do gerador do atlas."""
+        return {
+            "brightness": self.generator_brightness[1].get_value() / 100.0,
+            "contrast": self.generator_contrast[1].get_value() / 100.0,
+            "saturation": self.generator_saturation[1].get_value() / 100.0,
+            "temperature": self.generator_temperature[1].get_value() / 100.0,
+        }
+
+    def on_generator_changed(self, _scale) -> None:
+        if getattr(self, "_generator_updating", False):
+            return
+        self._update_generator_preview()
+
+    def on_generator_open_image(self, _button) -> None:
+        if not atlas.DEPENDENCIES_AVAILABLE:
+            self.toast(
+                "O gerador requer numpy e Pillow "
+                "(no Solus: sudo eopkg it numpy python-pillow)."
+            )
+            return
+        dialog = Gtk.FileDialog()
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        image_filter = Gtk.FileFilter()
+        image_filter.set_name("Imagem (PNG/JPEG)")
+        image_filter.add_pattern("*.png")
+        image_filter.add_pattern("*.jpg")
+        image_filter.add_pattern("*.jpeg")
+        filters.append(image_filter)
+        dialog.set_filters(filters)
+        dialog.open(self, None, self._generator_image_dialog_done)
+
+    def _generator_image_dialog_done(self, dialog, result) -> None:
+        try:
+            file = dialog.open_finish(result)
+        except GLib.Error:
+            return  # diálogo cancelado
+        path = file.get_path() if file is not None else None
+        if not path:
+            return
+        try:
+            from PIL import Image
+
+            self._generator_reference = Image.open(path).convert("RGB")
+        except (OSError, ValueError) as exc:
+            self.toast(f"Não foi possível abrir a imagem: {exc}", 6)
+            return
+        self._update_generator_preview()
+        self.toast(f"Referência do gerador: {Path(path).name}", 3)
+
+    def _update_generator_preview(self) -> None:
+        """Aplica os ajustes na referência (ou na faixa gerada) e exibe."""
+        if not hasattr(self, "generator_picture") or not atlas.DEPENDENCIES_AVAILABLE:
+            return
+        self._generator_updating = True
+        try:
+            params = self._generator_params()
+            if self._generator_reference is not None:
+                preview = atlas.apply_params_to_image(
+                    self._generator_reference, **params
+                )
+                preview.thumbnail((560, 560))
+            else:
+                preview = atlas.generate_lut_image(**params)
+                preview.thumbnail((768, 768))
+            state_dir = core.app_state_dir()
+            state_dir.mkdir(parents=True, exist_ok=True)
+            target = state_dir / "gerador_preview.png"
+            preview.save(target, format="PNG")
+            try:
+                self.generator_picture.set_paintable(
+                    Gdk.Texture.new_from_filename(str(target))
+                )
+            except (GLib.Error, AttributeError):
+                pass
+        finally:
+            self._generator_updating = False
+
+    def on_generator_save(self, _button) -> None:
+        """Grava a LUT gerada pelos sliders na linha selecionada do atlas."""
+        installed = self._installed_atlas_path()
+        if installed is None:
+            self.toast(
+                "Instale o pacote MultiLUT v1.8 antes de gravar a LUT gerada."
+            )
+            return
+        if not atlas.DEPENDENCIES_AVAILABLE:
+            self.toast(
+                "O gerador requer numpy e Pillow "
+                "(no Solus: sudo eopkg it numpy python-pillow)."
+            )
+            return
+        row = self._selected_atlas_row()
+        params = self._generator_params()
+        strip = atlas.generate_lut_image(**params)
+        labels = ", ".join(
+            f"{key}={value:g}"
+            for key, value in params.items()
+            if value != atlas.LUT_GENERATOR_DEFAULTS[key]
+        ) or "identidade"
+        try:
+            info = atlas.override_row_with_strip(
+                installed, row, strip, source=f"gerador ({labels})"
+            )
+        except core.MultiLUTError as exc:
+            self.toast(f"Falha ao gravar a LUT gerada: {exc}")
+            return
+        self._after_atlas_change(
+            f"Linha {info['row']} recebeu a LUT do gerador ({labels}; backup gravado)."
         )
 
     def on_atlas_restore_row_clicked(self, _button) -> None:
@@ -2078,26 +2270,59 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             return GLib.SOURCE_REMOVE
         self._hotkey_applying = True
         try:
+            self.cycle_profile(1, origin="hotkey")
+        finally:
+            self._hotkey_applying = False
+        return GLib.SOURCE_REMOVE
+
+    def cycle_profile(self, step: int = 1, origin: str = "hotkey") -> None:
+        """Aplica o próximo (step=1) ou anterior (step=-1) perfil, ciclando.
+
+        Compartilhado pelo atalho global (origem "hotkey") e pelo menu da
+        bandeja (origem "tray"); a troca vai para o histórico com a origem.
+        """
+        if getattr(self, "_cycling", False):
+            return
+        self._cycling = True
+        try:
             if not self.shader_valid:
-                self.toast("Atalho global: shader inválido.", 5)
-                return GLib.SOURCE_REMOVE
+                self.toast("Troca de perfil: shader inválido.", 5)
+                return
             try:
                 active = core.read_active_profile(self.shader_path)
-                target = core.PROFILE_BY_ID[core.next_profile_id(active)]
+                target = core.PROFILE_BY_ID[core.next_profile_id(active, step)]
                 core.set_active_profile(self.shader_path, target.id)
             except (OSError, UnicodeError, core.MultiLUTError) as exc:
-                self.toast(f"Atalho global falhou: {exc}", 6)
-                return GLib.SOURCE_REMOVE
+                self.toast(f"Troca de perfil falhou: {exc}", 6)
+                return
             self.config["shader_path"] = str(self.shader_path)
             self.config["last_profile"] = target.id
             core.save_config(self.config)
             self.select_profile_id(target.id)
             self.refresh_shader_status()
-            self._record_history("hotkey", target)
-            self.toast(f"{target.name} aplicado pelo atalho global.")
+            self._record_history(origin, target, previous=active)
+            if origin == "hotkey":
+                self.toast(f"{target.name} aplicado pelo atalho global.")
+            else:
+                self.toast(f"{target.name} aplicado pela bandeja.")
         finally:
-            self._hotkey_applying = False
-        return GLib.SOURCE_REMOVE
+            self._cycling = False
+
+    def toggle_pilot(self) -> None:
+        """Pausa/retoma o piloto automático (menu da bandeja)."""
+        new_state = not bool(self.config.get("auto_map_switch", False))
+        self.config["auto_map_switch"] = new_state
+        core.save_config(self.config)
+        switch = getattr(self, "auto_map_switch", None)
+        if switch is not None:
+            switch.set_active(new_state)
+        application = self.get_application()
+        if application is not None and hasattr(application, "_refresh_tray"):
+            application._refresh_tray(self)
+        if new_state:
+            self.toast("Piloto automático retomado.")
+        else:
+            self.toast("Piloto automático pausado pela bandeja.", 5)
 
     def _disable_hotkey_switch(self, reason: str) -> bool:
         self.toast(f"Atalho global indisponível: {reason}", 7)
@@ -2154,6 +2379,9 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         core.append_history(entry)
         self.refresh_history()
         self._notify_profile_change(profile, origin, previous=previous)
+        application = self.get_application()
+        if application is not None and hasattr(application, "_refresh_tray"):
+            application._refresh_tray(self)
 
     def _notify_profile_change(
         self,
@@ -2386,6 +2614,47 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         autostart_box.append(self.autostart_switch)
         page.append(autostart_box)
 
+        tray_supported = tray.tray_supported()
+        tray_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        tray_title = Gtk.Label(
+            label="Ícone na bandeja (menu rápido: perfis, próximo/anterior, piloto)"
+            if tray_supported
+            else "Ícone na bandeja (requer libayatana-appindicator)",
+            xalign=0,
+        )
+        tray_title.set_hexpand(True)
+        tray_title.set_wrap(True)
+        self.tray_switch = Gtk.Switch()
+        self.tray_switch.set_active(bool(self.config.get("tray_enabled", True)))
+        self.tray_switch.set_sensitive(tray_supported)
+        self.tray_switch.connect("state-set", self.on_tray_changed)
+        if not tray_supported:
+            self.tray_switch.set_tooltip_text(
+                "Instale libayatana-appindicator (Solus: sudo eopkg it "
+                "libayatana-appindicator-gtk3) e habilite a extensão "
+                "AppIndicator no GNOME"
+            )
+        tray_box.append(tray_title)
+        tray_box.append(self.tray_switch)
+        page.append(tray_box)
+
+        tray_close_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        tray_close_title = Gtk.Label(
+            label="Continuar rodando na bandeja ao fechar a janela",
+            xalign=0,
+        )
+        tray_close_title.set_hexpand(True)
+        tray_close_title.set_wrap(True)
+        self.tray_hide_switch = Gtk.Switch()
+        self.tray_hide_switch.set_active(
+            bool(self.config.get("tray_hide_on_close", True))
+        )
+        self.tray_hide_switch.set_sensitive(tray_supported)
+        self.tray_hide_switch.connect("state-set", self.on_tray_hide_changed)
+        tray_close_box.append(tray_close_title)
+        tray_close_box.append(self.tray_hide_switch)
+        page.append(tray_close_box)
+
         update_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self.update_label = Gtk.Label(
             label=f"MultiLUT Controller v{core.APP_VERSION}", xalign=0
@@ -2519,7 +2788,26 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.refresh_system_page()
         self.toast("Diagnóstico atualizado.")
 
-    # ------------------------------------------------------------ autostart e relatório
+    # ------------------------------------------------------------ bandeja (F9)
+    def on_tray_changed(self, switch, state: bool) -> bool:
+        """Liga/desliga o ícone da bandeja na hora (sem reabrir o app)."""
+        self.config["tray_enabled"] = bool(state)
+        core.save_config(self.config)
+        application = self.get_application()
+        if application is not None and hasattr(application, "setup_tray"):
+            application.setup_tray(self)
+        if state:
+            self.toast("Bandeja ativada (sujeita ao suporte do ambiente).")
+        else:
+            self.toast("Bandeja desativada.")
+        return False
+
+    def on_tray_hide_changed(self, switch, state: bool) -> bool:
+        """Fechar a janela: ocultar para a bandeja (ligado) ou sair (desligado)."""
+        self.config["tray_hide_on_close"] = bool(state)
+        core.save_config(self.config)
+        return False
+
     def on_autostart_changed(self, switch, state: bool) -> bool:
         """Liga/desliga o início com a sessão (XDG autostart, janela oculta)."""
         if self._autostart_programmatic:
@@ -3180,10 +3468,97 @@ class MultiLUTApplication(Adw.Application):
     def __init__(self, start_minimized: bool = False):
         super().__init__(application_id=core.APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.start_minimized = start_minimized
+        self._tray = None
         self.connect("activate", self.on_activate)
         undo = Gio.SimpleAction.new("undo-profile", GLib.VariantType.new("s"))
         undo.connect("activate", self.on_undo_profile)
         self.add_action(undo)
+        activate_profile = Gio.SimpleAction.new(
+            "activate-profile", GLib.VariantType.new("s")
+        )
+        activate_profile.connect("activate", self.on_app_activate_profile)
+        self.add_action(activate_profile)
+        for name, handler in (
+            ("next-profile", self.on_app_next_profile),
+            ("prev-profile", self.on_app_prev_profile),
+            ("toggle-pilot", self.on_app_toggle_pilot),
+            ("open-window", self.on_app_open_window),
+            ("quit", self.on_app_quit),
+        ):
+            action = Gio.SimpleAction.new(name, None)
+            action.connect("activate", handler)
+            self.add_action(action)
+
+    # ------------------------------------------------------------ bandeja (F9)
+    def setup_tray(self, window) -> None:
+        """Cria ou remove o ícone da bandeja conforme o config."""
+        enabled = bool(window.config.get("tray_enabled", True))
+        if not enabled:
+            if self._tray is not None:
+                self._tray.destroy()
+                self._tray = None
+            return
+        if self._tray is not None:
+            self._refresh_tray(window)
+            return
+        if not tray.tray_supported():
+            return
+        try:
+            self._tray = tray.TrayIcon()
+        except tray.TrayError as exc:
+            window.toast(str(exc), 8)
+            return
+        self._refresh_tray(window)
+
+    def _refresh_tray(self, window=None) -> None:
+        if self._tray is None:
+            return
+        window = window or self.props.active_window
+        if window is None:
+            return
+        try:
+            self._tray.update(
+                tray.build_menu_entries(
+                    recent_profiles=tray.recent_profiles(),
+                    pilot_on=bool(window.config.get("auto_map_switch", False)),
+                )
+            )
+        except (AttributeError, RuntimeError):
+            pass
+
+    def on_app_next_profile(self, _action, _parameter) -> None:
+        window = self.props.active_window
+        if window is not None:
+            window.cycle_profile(1, origin="tray")
+
+    def on_app_prev_profile(self, _action, _parameter) -> None:
+        window = self.props.active_window
+        if window is not None:
+            window.cycle_profile(-1, origin="tray")
+
+    def on_app_toggle_pilot(self, _action, _parameter) -> None:
+        window = self.props.active_window
+        if window is not None:
+            window.toggle_pilot()
+
+    def on_app_open_window(self, _action, _parameter) -> None:
+        window = self.props.active_window
+        if window is not None:
+            window.present()
+
+    def on_app_quit(self, _action, _parameter) -> None:
+        self.quit()
+
+    def on_app_activate_profile(self, _action, parameter) -> None:
+        """Item de perfil recente da bandeja."""
+        window = self.props.active_window
+        if window is None:
+            return
+        try:
+            profile_id = int(parameter.get_string())
+        except (AttributeError, TypeError, ValueError):
+            return
+        window.apply_profile_id(profile_id, origin="tray")
 
     def on_undo_profile(self, _action, parameter) -> None:
         """Botão “Desfazer” da notificação: reaplica o perfil anterior."""
@@ -3203,7 +3578,9 @@ class MultiLUTApplication(Adw.Application):
             if self.start_minimized:
                 # autostart com --minimized: janela pronta e piloto armado,
                 # porém oculta; abrir o app de novo (nova ativação) apresenta.
+                self.setup_tray(window)
                 return
+        self.setup_tray(window)
         window.present()
 
 
