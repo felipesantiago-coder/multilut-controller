@@ -126,11 +126,15 @@ class DaemonPilot:
         return None
 
     def apply_map_token(self, token: str, simulated: bool = False) -> dict | None:
-        """Detectou o mapa: aplica o perfil dele se o piloto está ligado."""
-        profile = core.match_map_profile(token)
+        """Detectou o mapa: aplica o perfil dele se o piloto está ligado.
+
+        Regras aprendidas (config["map_rules"], mapa exato → perfil) têm
+        prioridade sobre o casamento por slug do pacote.
+        """
+        config = core.load_config()
+        profile = core.match_map_profile(token, core.map_rules(config))
         if profile is None:
             return None
-        config = core.load_config()
         if not bool(config.get("auto_map_switch", False)):
             return None
         shader = self.resolve_shader()
@@ -168,28 +172,103 @@ class DaemonPilot:
             "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         self.record_status()
-        self._notify(
+        previous_profile = core.PROFILE_BY_ID.get(active)
+        old_name = previous_profile.name if previous_profile else f"{active:02d}"
+        self._notify_change(
             "MultiLUT: piloto automático",
-            f"{token} -> {profile.id:02d} — {profile.name}",
+            f"{token}: {old_name} → {profile.name}",
+            undo_profile_id=active,
         )
         return {"token": token, "profile_id": profile.id, "profile_name": profile.name, "changed": True}
 
+    def apply_profile_id(self, profile_id: int, origin: str = "daemon") -> dict | None:
+        """Aplica um perfil específico pelo id (usado pelo desfazer da notificação)."""
+        profile = core.PROFILE_BY_ID.get(int(profile_id))
+        if profile is None:
+            return None
+        shader = self.resolve_shader()
+        if shader is None:
+            return None
+        try:
+            active = core.read_active_profile(shader)
+        except (core.MultiLUTError, OSError, UnicodeError):
+            return None
+        if active == profile.id:
+            return None
+        try:
+            core.set_active_profile(shader, profile.id)
+        except (OSError, UnicodeError, core.MultiLUTError) as exc:
+            self._notify("MultiLUT: falha ao aplicar", str(exc))
+            return None
+        config = core.load_config()
+        config["shader_path"] = str(shader)
+        config["last_profile"] = profile.id
+        core.save_config(config)
+        core.append_history(
+            {
+                "profile_id": profile.id,
+                "profile_name": profile.name,
+                "origin": origin,
+                "previous": active,
+                "shader": str(shader),
+                "detail": "desfazer da notificação" if origin == "undo" else "",
+            }
+        )
+        self.events += 1
+        self.record_status()
+        self._notify("MultiLUT: perfil restaurado", f"{profile.id:02d} — {profile.name}")
+        return {"profile_id": profile.id, "profile_name": profile.name, "changed": True}
+
     def _notify(self, title: str, body: str) -> None:
+        self._notify_change(title, body, undo_profile_id=None)
+
+    def _notify_change(
+        self, title: str, body: str, undo_profile_id: int | None = None
+    ) -> None:
+        """Notificação do desktop; com botão “Desfazer” quando há perfil anterior.
+
+        O notify-send roda com --action e --wait em thread própria: enquanto o
+        usuário não interage (ou decai) o piloto segue livre; ao escolher
+        “Desfazer”, o perfil anterior é reaplicado no loop principal.
+        """
         if not bool(core.load_config().get("notify_changes", False)):
             return
         binary = shutil.which("notify-send")
         if not binary:
             return
+        argv = [binary, *notify_send_args(title, body, undo_profile_id)[1:]]
+        if undo_profile_id is None:
+            try:
+                subprocess.Popen(
+                    argv,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError:
+                pass
+            return
+        thread = threading.Thread(
+            target=self._wait_undo, args=(argv, int(undo_profile_id)), daemon=True
+        )
+        thread.start()
+
+    def _wait_undo(self, argv: list[str], undo_profile_id: int) -> None:
         try:
-            subprocess.Popen(
-                [binary, "-a", "MultiLUT Controller", "-i",
-                 "com.felipesantiago.MultiLUTController", title, body],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
+            outcome = subprocess.run(
+                argv, capture_output=True, text=True, timeout=120
             )
-        except OSError:
-            pass
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        if outcome.stdout is not None and outcome.stdout.strip() == "undo":
+            GLib.idle_add(self._apply_undo_from_notification, undo_profile_id)
+
+    def _apply_undo_from_notification(self, profile_id: int) -> bool:
+        try:
+            self.apply_profile_id(profile_id, origin="undo")
+        except core.MultiLUTError as exc:
+            self._notify("MultiLUT: desfazer falhou", str(exc))
+        return GLib.SOURCE_REMOVE
 
     # ------------------------------------------------------------ monitor do console.log
     def start(self) -> None:
@@ -430,6 +509,27 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         shutdown()
     return 0
+
+
+def notify_send_args(
+    title: str, body: str, undo_profile_id: int | None = None
+) -> list[str]:
+    """argv do notify-send (sem o binário); com --action/--wait quando há desfazer.
+
+    Mantido como função de módulo para ser testável sem GLib nem notificações
+    reais: o botão “Desfazer” usa a ação nomeada ``undo`` e o --wait faz o
+    notify-send imprimir a ação escolhida (ou sair quando a notificação some).
+    """
+    argv = [
+        "-a",
+        "MultiLUT Controller",
+        "-i",
+        "com.felipesantiago.MultiLUTController",
+    ]
+    if undo_profile_id is not None:
+        argv += ["--action=undo=Desfazer", "--wait"]
+    argv += [title, body]
+    return argv
 
 
 if __name__ == "__main__":

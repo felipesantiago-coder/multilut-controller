@@ -726,18 +726,78 @@ def parse_map_token(line: str) -> str | None:
     return None
 
 
-def match_map_profile(token: str | None) -> Profile | None:
+def normalize_map_token(token: str | None) -> str:
+    """Token do mapa normalizado: minúsculas, sem aspas ou espaços das bordas."""
+    if not token:
+        return ""
+    text = str(token).strip().strip('"').casefold()
+    return text
+
+
+def map_rules(config: dict | None) -> dict[str, int]:
+    """Regras aprendidas de mapa → perfil, validadas contra os perfis.
+
+    Guardadas em config["map_rules"] como {"tell": 22, "sinjar_night": 15};
+    entradas inválidas (perfil inexistente, token vazio) são ignoradas.
+    """
+    raw = (config or {}).get("map_rules")
+    if not isinstance(raw, dict):
+        return {}
+    rules: dict[str, int] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        token = normalize_map_token(key)
+        try:
+            profile_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if token and profile_id in PROFILE_BY_ID:
+            rules[token] = profile_id
+    return rules
+
+
+def set_map_rule(config: dict, token: str, profile_id: int) -> bool:
+    """Grava (ou atualiza) a regra mapa → perfil no config informado."""
+    token = normalize_map_token(token)
+    if not token or profile_id not in PROFILE_BY_ID:
+        return False
+    rules = config.setdefault("map_rules", {})
+    if not isinstance(rules, dict):
+        rules = config["map_rules"] = {}
+    rules[token] = int(profile_id)
+    return True
+
+
+def remove_map_rule(config: dict, token: str) -> bool:
+    """Remove a regra do mapa; devolve True se ela existia."""
+    token = normalize_map_token(token)
+    rules = (config or {}).get("map_rules")
+    if isinstance(rules, dict) and token in rules:
+        del rules[token]
+        return True
+    return False
+
+
+def match_map_profile(
+    token: str | None, rules: dict[str, int] | None = None
+) -> Profile | None:
     """Perfil de mapa correspondente ao nome do mapa carregado, ou None.
 
-    "market_coop" casa com Market, "sinjar_night" com Sinjar. O casamento é
-    por partes do nome (hífen/underline/colchetes separam) e, em segundo
-    lugar, por prefixo do token inteiro.
+    "market_coop" casa com Market, "sinjar_night" com Sinjar. Regras
+    aprendidas (mapa exato → perfil) vêm primeiro e vencem o casamento por
+    slug; o casamento por partes do nome (hífen/underline/colchetes) e, em
+    segundo lugar, por prefixo do token inteiro continua como antes.
     """
     if not token:
         return None
-    text = str(token).strip().strip('"').casefold()
+    text = normalize_map_token(token)
     if not text:
         return None
+    if rules:
+        direct = rules.get(text)
+        if direct is not None and direct in PROFILE_BY_ID:
+            return PROFILE_BY_ID[direct]
     parts = [part for part in re.split(r"[^a-z0-9]+", text) if part]
     for profile in PROFILES:
         slug = map_image_slug(profile)

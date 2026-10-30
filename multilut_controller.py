@@ -45,6 +45,8 @@ ORIGIN_LABELS = {
     "cli": "CLI",
     "hotkey": "Atalho global",
     "external": "Troca externa",
+    "undo": "Desfeito",
+    "tray": "Bandeja",
 }
 
 # Portal de atalhos globais (org.freedesktop.portal.GlobalShortcuts; GNOME 46+)
@@ -376,6 +378,12 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self._programmatic_selection = False
         self._atlas_pixbuf = None
         self._atlas_pixbuf_source = None
+        # último mapa visto no console.log (contexto para o aprendizado de regras)
+        self._last_map_token = ""
+        # ação da janela: “Sempre neste mapa” do toast de aprendizado
+        associate = Gio.SimpleAction.new("associate-map", GLib.VariantType.new("s"))
+        associate.connect("activate", self.on_associate_map)
+        self.add_action(associate)
         # pré-visualização LUT (simulação em CPU do shader)
         self._preview_generation = 0
         self._preview_programmatic = False
@@ -1893,6 +1901,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
     def _on_map_detected(self, profile: core.Profile, token: str) -> None:
         """Mapa carregado no jogo: aplica o perfil dele se o piloto está ligado."""
+        self._last_map_token = core.normalize_map_token(token) or token
         if not self.config.get("auto_map_switch", False):
             return
         if not self.shader_valid:
@@ -1913,7 +1922,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         core.save_config(self.config)
         self.select_profile_id(profile.id)
         self.refresh_shader_status()
-        self._record_history("auto-map", profile, detail=token)
+        self._record_history("auto-map", profile, detail=token, previous=active)
         self.toast(f"Piloto automático: {token} → {profile.name}", 5)
 
     # ------------------------------------------------------------ atalho global (portal)
@@ -2125,31 +2134,61 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self._hotkey_bus = None
 
     # ------------------------------------------------------------ histórico e notificações
-    def _record_history(self, origin: str, profile: core.Profile, detail: str = "") -> None:
+    def _record_history(
+        self,
+        origin: str,
+        profile: core.Profile,
+        detail: str = "",
+        previous: int | None = None,
+    ) -> None:
         """Registra a troca no histórico local e dispara a notificação configurada."""
-        core.append_history(
-            {
-                "profile_id": profile.id,
-                "profile_name": profile.name,
-                "origin": origin,
-                "detail": detail,
-                "shader": str(self.shader_path),
-            }
-        )
+        entry = {
+            "profile_id": profile.id,
+            "profile_name": profile.name,
+            "origin": origin,
+            "detail": detail,
+            "shader": str(self.shader_path),
+        }
+        if previous is not None:
+            entry["previous"] = int(previous)
+        core.append_history(entry)
         self.refresh_history()
-        self._notify_profile_change(profile, origin)
+        self._notify_profile_change(profile, origin, previous=previous)
 
-    def _notify_profile_change(self, profile: core.Profile, origin: str) -> None:
-        """Notificação do desktop para trocas que não vieram da própria janela."""
+    def _notify_profile_change(
+        self,
+        profile: core.Profile,
+        origin: str,
+        previous: int | None = None,
+    ) -> None:
+        """Notificação do desktop para trocas que não vieram da própria janela.
+
+        Com perfil anterior conhecido, o corpo mostra “antigo → novo” e a
+        notificação ganha o botão “Desfazer” (ação app.undo-profile::<id>),
+        útil com a janela oculta ou minimizada.
+        """
         if not self.config.get("notify_changes", False):
             return
         if origin == "manual":
             return  # o toast da janela já basta para trocas manuais
+        if origin == "auto-map" and self.is_visible():
+            return  # o toast do piloto já basta com a janela na frente
         origin_text = ORIGIN_LABELS.get(origin, origin)
         notification = Gio.Notification.new("MultiLUT Controller")
-        notification.set_body(
-            f"{origin_text}: perfil ativo {profile.id:02d} — {profile.name}"
+        previous_profile = (
+            core.PROFILE_BY_ID.get(int(previous)) if previous is not None else None
         )
+        if previous_profile is not None:
+            notification.set_body(
+                f"{origin_text}: {previous_profile.name} → {profile.name}"
+            )
+            notification.add_button(
+                "Desfazer", f"app.undo-profile::{int(previous)}"
+            )
+        else:
+            notification.set_body(
+                f"{origin_text}: perfil ativo {profile.id:02d} — {profile.name}"
+            )
         self.send_notification(None, notification)
 
     def build_history_page(self) -> Gtk.Widget:
@@ -2753,7 +2792,9 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         if previous == self.selected_profile.id:
             self.toast(f"{self.selected_profile.name} já estava ativo.")
         else:
-            self._record_history("manual", self.selected_profile)
+            self._record_history(
+                "manual", self.selected_profile, previous=previous
+            )
             if core.is_game_running():
                 self.toast(
                     f"{self.selected_profile.name} aplicado ao jogo em tempo real.",
@@ -2761,12 +2802,105 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                 )
             else:
                 self.toast(f"Perfil {self.selected_profile.name} aplicado com segurança.")
+        self._maybe_offer_map_rule(self.selected_profile)
+        return True
+
+    def _maybe_offer_map_rule(self, profile: core.Profile) -> None:
+        """Autoaprendizado: com mapa ativo, oferece “sempre usar neste mapa”.
+
+        Só aparece para trocas manuais com o jogo aberto e quando a regra
+        ainda não é exatamente essa; o toast tem o botão da ação
+        win.associate-map com o par “token\tperfil” alvo.
+        """
+        token = getattr(self, "_last_map_token", "")
+        if not token or not core.is_game_running():
+            return
+        if core.map_rules(self.config).get(core.normalize_map_token(token)) == profile.id:
+            return
+        toast = Adw.Toast.new(f"Sempre usar {profile.name} no mapa {token}?")
+        toast.set_timeout(10)
+        toast.add_button("Sempre neste mapa", "win.associate-map")
+        toast.set_action_target_value(GLib.Variant.new_string(f"{token}\t{profile.id}"))
+        self.toast_overlay.add_toast(toast)
+
+    def on_associate_map(self, _action, parameter) -> None:
+        """Botão “Sempre neste mapa”: grava a regra mapa → perfil aprendida."""
+        raw = parameter.get_string()
+        token, _, number = raw.partition("\t")
+        try:
+            profile_id = int(number)
+        except ValueError:
+            return
+        if not core.set_map_rule(self.config, token, profile_id):
+            return
+        core.save_config(self.config)
+        profile = core.PROFILE_BY_ID[profile_id]
+        self.toast(
+            f"Regra criada: mapa {core.normalize_map_token(token)} usará sempre "
+            f"{profile.name} (vale para a janela e para o daemon).",
+            7,
+        )
+
+    def apply_profile_id(self, profile_id: int, origin: str) -> bool:
+        """Aplica um perfil pelo id (desfazer da notificação e menu da bandeja)."""
+        profile = core.PROFILE_BY_ID.get(int(profile_id))
+        if profile is None:
+            return False
+        self.select_profile_id(profile.id)
+        self.update_detail(profile)
+        try:
+            previous = core.set_active_profile(self.shader_path, profile.id)
+            self.config["shader_path"] = str(self.shader_path)
+            self.config["last_profile"] = profile.id
+            core.save_config(self.config)
+        except (OSError, UnicodeError, core.MultiLUTError) as exc:
+            self.toast(str(exc), 6)
+            self.refresh_shader_status()
+            return False
+        self.refresh_shader_status()
+        self.start_file_monitor()
+        self._record_history(origin, profile, previous=previous)
+        if origin == "undo":
+            self.toast(f"Perfil {profile.name} restaurado.", 5)
+        else:
+            self.toast(f"Perfil {profile.name} aplicado.", 4)
         return True
 
     def on_apply_and_launch(self, _button) -> None:
+        """Launcher integrado: valida pré-requisitos e abre o jogo pela Steam."""
         if core.is_game_running():
             self.toast("O Insurgency já está aberto. Use “Aplicar perfil” para trocar em tempo real.", 6)
             return
+        checks = extra.launch_prechecks(self.config, shader_path=self.shader_path)
+        blocked = [item for item in checks if not item["ok"] and item["critical"]]
+        if blocked:
+            self._confirm_launch_with_problems(blocked)
+            return
+        self._apply_and_launch_now()
+
+    def _confirm_launch_with_problems(self, blocked: list[dict]) -> None:
+        """Pergunta antes de abrir com pré-requisitos pendentes (shader, camada,
+        opção de inicialização); o usuário pode abrir mesmo assim."""
+        lines = "\n".join(f"•  {item['title']}: {item['detail']}" for item in blocked)
+        body = (
+            "Estes pré-requisitos estão pendentes:\n\n"
+            f"{lines}\n\n"
+            "Abrir o jogo mesmo assim?"
+        )
+        dialog = Adw.MessageDialog.new(self, "Abrir o Insurgency?", body)
+        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("launch", "Abrir mesmo assim")
+        dialog.set_response_appearance("launch", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", self._on_launch_confirm_response)
+        dialog.present()
+
+    def _on_launch_confirm_response(self, _dialog, response: str) -> None:
+        if response == "launch":
+            self._apply_and_launch_now()
+
+    def _apply_and_launch_now(self) -> None:
         if not self.apply_selected_profile():
             return
         try:
@@ -2774,7 +2908,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         except core.MultiLUTError as exc:
             self.toast(str(exc), 6)
             return
-        self.toast("Solicitação enviada ao Steam.")
+        self.toast("Solicitação enviada ao Steam.", 5)
 
     def on_restore(self, _button) -> None:
         try:
@@ -3047,6 +3181,20 @@ class MultiLUTApplication(Adw.Application):
         super().__init__(application_id=core.APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.start_minimized = start_minimized
         self.connect("activate", self.on_activate)
+        undo = Gio.SimpleAction.new("undo-profile", GLib.VariantType.new("s"))
+        undo.connect("activate", self.on_undo_profile)
+        self.add_action(undo)
+
+    def on_undo_profile(self, _action, parameter) -> None:
+        """Botão “Desfazer” da notificação: reaplica o perfil anterior."""
+        window = self.props.active_window
+        if window is None:
+            return
+        try:
+            profile_id = int(parameter.get_string())
+        except (AttributeError, TypeError, ValueError):
+            return
+        window.apply_profile_id(profile_id, origin="undo")
 
     def on_activate(self, app) -> None:
         window = self.props.active_window

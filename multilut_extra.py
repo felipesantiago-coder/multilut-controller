@@ -141,6 +141,121 @@ def launch_option_files() -> list[Path]:
     return find_localconfig_files()
 
 
+def map_rules_status() -> tuple[str, str]:
+    """Estado das regras aprendidas de mapa → perfil para o doctor."""
+    rules = core.map_rules(core.load_config())
+    if not rules:
+        return (
+            "info",
+            "nenhuma; troque um perfil manualmente com o jogo aberto e clique "
+            "“Sempre neste mapa” para o piloto aprender",
+        )
+    sample = ", ".join(
+        f"{token} → {core.PROFILE_BY_ID[profile_id].name}"
+        for token, profile_id in sorted(rules.items())[:3]
+    )
+    suffix = "…" if len(rules) > 3 else ""
+    return "ok", f"{len(rules)} regra(s): {sample}{suffix}"
+
+
+def launch_prechecks(
+    config: dict | None = None,
+    shader_path: Path | str | None = None,
+) -> list[dict]:
+    """Checklist antes de abrir o jogo pelo launcher integrado.
+
+    Devolve itens {"ok", "critical", "title", "detail"}; itens critical=True
+    bloqueiam a sugestão de abrir (o usuário ainda pode forçar na interface).
+    Reaproveita exatamente os mesmos verificadores do doctor.
+    """
+    data = dict(config) if config else core.load_config()
+    checks: list[dict] = []
+
+    shader = Path(shader_path) if shader_path else core.default_shader_path()
+    if not shader.is_file():
+        candidates = core.find_shader_candidates()
+        shader = candidates[0] if candidates else shader
+    valid, message = core.validate_shader(shader)
+    checks.append(
+        {
+            "ok": valid,
+            "critical": True,
+            "title": "Perfil MultiLUT (shader .fx)",
+            "detail": message,
+        }
+    )
+
+    state, detail = vkbasalt_layer_status()
+    checks.append(
+        {
+            "ok": state == "ok",
+            "critical": True,
+            "title": "vkBasalt (camada Vulkan)",
+            "detail": detail,
+        }
+    )
+
+    state, detail = vkbasalt_config_status()
+    checks.append(
+        {
+            "ok": state != "fail",
+            "critical": False,
+            "title": "vkBasalt.conf (effects)",
+            "detail": detail,
+        }
+    )
+
+    state, detail = launch_option_report()
+    checks.append(
+        {
+            "ok": state == "ok",
+            "critical": True,
+            "title": "Opção de inicialização (ENABLE_VKBASALT=1 + -condebug)",
+            "detail": detail,
+        }
+    )
+
+    daemon = query_daemon()
+    if not bool(data.get("auto_map_switch", False)):
+        checks.append(
+            {
+                "ok": False,
+                "critical": False,
+                "title": "Piloto automático por mapa",
+                "detail": "desligado; ligue “Trocar perfil conforme o mapa”",
+            }
+        )
+    elif daemon is not None:
+        checks.append(
+            {
+                "ok": True,
+                "critical": False,
+                "title": "Piloto automático por mapa",
+                "detail": f"ligado (daemon pid {daemon.get('pid', '?')})",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "ok": True,
+                "critical": False,
+                "title": "Piloto automático por mapa",
+                "detail": "ligado (a janela aberta arma o monitor)",
+            }
+        )
+
+    game_on = core.is_game_running()
+    checks.append(
+        {
+            "ok": True,
+            "critical": False,
+            "title": "Jogo",
+            "detail": "já está aberto (trocas em tempo real)" if game_on else "fechado",
+        }
+    )
+    return checks
+
+
 # ------------------------------------------------- escrita da opção (Steam fechado)
 def steam_running() -> bool:
     """True se houver processo do Steam ativo (ele regravaria localconfig.vdf)."""
@@ -466,6 +581,9 @@ def diagnostic_report() -> list[dict]:
     items.append(
         {"title": "Piloto automático por mapa", "state": state, "detail": detail}
     )
+
+    state, detail = map_rules_status()
+    items.append({"title": "Regras aprendidas por mapa", "state": state, "detail": detail})
 
     daemon = query_daemon()
     if daemon is not None:
@@ -993,6 +1111,9 @@ HELP_GLOSSARY: tuple[tuple[str, str], ...] = (
         "assim que ele é carregado; funciona na janela aberta ou pelo daemon."),
     ("Daemon", "Piloto rodando como serviço de usuário (systemd), sem janela; "
         "a interface e a CLI apenas o controlam (multilut-ctl daemon)."),
+    ("Regras aprendidas", "Associações mapa → perfil criadas pelo botão "
+        "“Sempre neste mapa” após uma troca manual com o jogo aberto; valem "
+        "para o piloto da janela e do daemon (config[\"map_rules\"])."),
     ("Backup do shader", "Cópia .multilut-backup do .fx criada a cada troca; "
         "Ctrl+Z restaura a anterior."),
 )

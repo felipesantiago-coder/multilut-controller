@@ -158,6 +158,20 @@ AUTOMACAO E INTEGRACAO
   -condebug (a linha 'Map: <mapa>' do cabecalho com Build/Server Number).
   Requer -condebug na opcao de inicializacao (a pagina Sistema diagnostica e
   corrige isso). A troca entra no historico com a origem "Piloto automatico".
+- Regras aprendidas por mapa: trocou um perfil manualmente com o jogo aberto?
+  Surge o toast "Sempre usar <perfil> no mapa <mapa>?"; o botao "Sempre neste
+  mapa" grava a associacao (config["map_rules"]) e o piloto passa a usar esse
+  perfil exato naquele mapa — regra exata vence o casamento por nome, na
+  janela e no daemon. O doctor lista as regras; a CLI remove:
+  "multilut-ctl rules" (listar) e "multilut-ctl rules remove <mapa>".
+- Launcher integrado: o botao "Aplicar e jogar" (e "multilut-ctl launch")
+  valida pre-requisitos antes de abrir o Insurgency pela Steam
+  (steam://rungameid/222880): shader valido, camada vkBasalt e a opcao de
+  inicializacao com ENABLE_VKBASALT=1 + -condebug. Havendo pendencia critica,
+  um dialogo lista o que falta e permite abrir mesmo assim (--force na CLI).
+- Notificacao com Desfazer: trocas do piloto com a janela oculta avisam no
+  desktop com "antigo -> novo" e o botao "Desfazer" devolve o perfil anterior
+  (janela e daemon); "Desfeito" aparece como origem no historico.
 - Daemon do piloto (sem janela): o mesmo piloto pode rodar como servico de
   usuario do systemd, trocando o perfil pelo mapa mesmo com a interface
   fechada. Instale/inicie com "multilut-ctl daemon install" (ou "daemon

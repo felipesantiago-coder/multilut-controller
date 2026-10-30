@@ -329,6 +329,50 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0 if valid else 1
 
 
+def cmd_rules(args: argparse.Namespace) -> int:
+    """Lista ou remove as regras aprendidas de mapa → perfil."""
+    config = core.load_config()
+    if args.acao == "remove":
+        removed = core.remove_map_rule(config, args.mapa)
+        if not removed:
+            print(f"Nenhuma regra para o mapa '{args.mapa}'.")
+            return 1
+        core.save_config(config)
+        print(f"Regra removida: {core.normalize_map_token(args.mapa)}")
+        return 0
+    rules = core.map_rules(config)
+    if not rules:
+        print(
+            "Nenhuma regra aprendida; troque um perfil manualmente com o jogo "
+            "aberto e clique “Sempre neste mapa”."
+        )
+        return 0
+    for token, profile_id in sorted(rules.items()):
+        profile = core.PROFILE_BY_ID[profile_id]
+        print(f"{token} -> {profile_id:02d} — {profile.name}")
+    return 0
+
+
+def cmd_launch(args: argparse.Namespace) -> int:
+    """Abre o Insurgency pela Steam após as pre-checagens do launcher."""
+    import multilut_extra as extra
+
+    if core.is_game_running() and not args.force:
+        print("O Insurgency já está aberto.")
+        return 0
+    checks = extra.launch_prechecks(shader_path=resolve_shader(args.shader))
+    blocked = [item for item in checks if not item["ok"] and item["critical"]]
+    if blocked and not args.force:
+        print("Pré-requisitos pendentes:")
+        for item in blocked:
+            print(f"  - {item['title']}: {item['detail']}")
+        print("Use --force para abrir mesmo assim.")
+        return 1
+    core.launch_game()
+    print("Solicitação enviada ao Steam (steam://rungameid/222880).")
+    return 0
+
+
 def resolve_atlas(explicit: str | None) -> Path:
     """Atlas v1.8: --atlas, textura instalada válida ou pacote do app."""
     candidates: list[Path] = []
@@ -543,6 +587,30 @@ def build_parser() -> argparse.ArgumentParser:
         "status", parents=[common], help="diagnóstico rápido"
     )
     status_parser.set_defaults(func=cmd_status)
+
+    rules_parser = subparsers.add_parser(
+        "rules",
+        parents=[common],
+        help="lista as regras aprendidas de mapa → perfil",
+    )
+    rules_sub = rules_parser.add_subparsers(dest="acao")
+    rules_remove = rules_sub.add_parser(
+        "remove", parents=[common], help="remove a regra de um mapa"
+    )
+    rules_remove.add_argument("mapa", help="nome do mapa (ex.: tell)")
+    rules_parser.set_defaults(func=cmd_rules, acao="list")
+
+    launch_parser = subparsers.add_parser(
+        "launch",
+        parents=[common],
+        help="abre o Insurgency pela Steam com pre-checagens",
+    )
+    launch_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="abre mesmo com pré-requisitos pendentes",
+    )
+    launch_parser.set_defaults(func=cmd_launch)
 
     preview_parser = subparsers.add_parser(
         "preview",
