@@ -618,6 +618,9 @@ def diagnostic_report() -> list[dict]:
             f"ativo (pid {daemon.get('pid', '?')}); troca de perfil por mapa "
             "funciona com a janela fechada"
         )
+        rss_kib = daemon.get("rss_kib")
+        if isinstance(rss_kib, int) and rss_kib > 0:
+            detail += f"; RAM {rss_kib // 1024} MB de um teto de 192 MB"
         items.append({"title": "Daemon (piloto sem janela)", "state": "ok", "detail": detail})
     elif daemon_unit_installed():
         items.append(
@@ -749,10 +752,56 @@ Type=simple
 ExecStart=/usr/bin/python3 @APP_DIR@/multilut_daemon.py
 Restart=on-failure
 RestartSec=3
+# Teto de RAM do daemon: mesmo um problema inesperado de memoria nao pode
+# disputar RAM com o jogo (estourou, o systemd encerra e o Restart religa).
+MemoryHigh=96M
+MemoryMax=192M
 
 [Install]
 WantedBy=default.target
 """
+
+
+# Guardião de memória do daemon (rede de segurança fora do systemd também):
+# acima do limite suave o processo coleta lixo; acima do duro, encerra com
+# código de falha para o systemd religar limpo (Restart=on-failure).
+DAEMON_MEM_SOFT_KIB = 96 * 1024   # 96 MB
+DAEMON_MEM_HARD_KIB = 176 * 1024  # 176 MB (abaixo do MemoryMax da unit)
+
+
+def read_process_rss_kib(pid: int | None = None, proc_root: Path | None = None) -> int | None:
+    """RSS do processo em KiB, lido de /proc/<pid>/status (None se indisponível)."""
+    root = Path(proc_root) if proc_root else Path("/proc")
+    try:
+        target = root / str(os.getpid() if pid is None else int(pid)) / "status"
+        text = target.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    for line in text.splitlines():
+        if line.startswith("VmRSS:"):
+            fields = line.split()
+            if len(fields) >= 2:
+                try:
+                    return int(fields[1])
+                except ValueError:
+                    return None
+            return None
+    return None
+
+
+def daemon_memory_policy(
+    rss_kib: int | None,
+    soft_limit_kib: int = DAEMON_MEM_SOFT_KIB,
+    hard_limit_kib: int = DAEMON_MEM_HARD_KIB,
+) -> str:
+    """Decisão pura do guardião: "ok", "collect" (limite suave) ou "restart"."""
+    if rss_kib is None:
+        return "ok"
+    if rss_kib >= hard_limit_kib:
+        return "restart"
+    if rss_kib >= soft_limit_kib:
+        return "collect"
+    return "ok"
 
 
 def daemon_runtime_dir() -> Path:
@@ -914,10 +963,26 @@ def daemon_start() -> tuple[bool, str]:
 def ensure_daemon_unit(
     app_dir: Path | None = None, unit_dir: Path | None = None
 ) -> tuple[bool, str]:
-    """Garante a unidade systemd do daemon instalada (idempotente)."""
+    """Garante a unidade systemd do daemon instalada e atual (idempotente).
+
+    Unidade instalada por versão anterior do app (sem os tetos de memória,
+    por exemplo) é reescrita no lugar e o serviço é reiniciado para valer.
+    """
     try:
-        if daemon_unit_installed(unit_dir):
-            return True, "Serviço já instalado."
+        expected = DAEMON_UNIT_TEMPLATE.replace(
+            "@APP_DIR@", str(app_dir or core.app_repo_dir())
+        )
+        unit_path = daemon_unit_path(unit_dir)
+        if unit_path.is_file():
+            try:
+                if unit_path.read_text(encoding="utf-8") == expected:
+                    return True, "Serviço já instalado."
+            except OSError:
+                pass
+            daemon_install_unit(app_dir=app_dir, unit_dir=unit_dir)
+            if daemon_running():
+                daemon_systemctl("restart")  # limites de memória valem no (re)início
+            return True, "Serviço atualizado para a versão atual."
         daemon_install_unit(app_dir=app_dir, unit_dir=unit_dir)
     except (OSError, ValueError) as exc:
         return False, f"Falha ao instalar o serviço: {exc}"

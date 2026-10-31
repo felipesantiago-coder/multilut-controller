@@ -17,6 +17,7 @@ Estado persistente: XDG_STATE_HOME/multilut-controller/daemon.json
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import shutil
@@ -62,6 +63,7 @@ class DaemonPilot:
         self._tail: core.ConsoleTail | None = None
         self._debounce_id: int | None = None
         self.stop_requested = False
+        self.restart_requested = False  # guardião de memória pediu religar
         self.brightness = extra.BrightnessController()
 
     # ------------------------------------------------------------ comando/status
@@ -75,6 +77,7 @@ class DaemonPilot:
             "last_map": self.last_map,
             "console_log": str(self._console_path) if self._console_path else None,
             "auto_map_switch": bool(config.get("auto_map_switch", False)),
+            "rss_kib": extra.read_process_rss_kib(),
         }
 
     def record_status(self) -> None:
@@ -358,8 +361,8 @@ class DaemonPilot:
         try:
             size = path.stat().st_size
             with path.open("rb") as stream:
-                stream.seek(max(0, size - 262144))
-                data = stream.read()
+                stream.seek(max(0, size - core.CONSOLE_READ_BLOCK))
+                data = stream.read(core.CONSOLE_READ_BLOCK)
         except OSError:
             return GLib.SOURCE_REMOVE
         parser = core.ConsoleTail()
@@ -404,22 +407,41 @@ class DaemonPilot:
             size = path.stat().st_size
             if size < tail.offset:
                 tail.reset()  # truncado: o jogo recriou o arquivo
-            lines: list[str] = []
+            # Orçamento de RAM por dreno: core.CONSOLE_DRAIN_BLOCKS x
+            # core.CONSOLE_READ_BLOCK (16 x 256 KB = 4 MB). As linhas são
+            # processadas bloco a bloco e só o último token sobrevive — nada
+            # de acumular o log inteiro em memória enquanto o jogo roda.
+            latest = None
             with path.open("rb") as stream:
                 stream.seek(tail.offset)
-                for _ in range(128):  # 128 x 256 KB = 32 MB por dreno, no máximo
-                    data = stream.read(262144)
+                for _ in range(core.CONSOLE_DRAIN_BLOCKS):
+                    data = stream.read(core.CONSOLE_READ_BLOCK)
                     if not data:
                         break
-                    lines.extend(tail.feed(data))
+                    for token in tail.map_tokens(tail.feed(data)):
+                        latest = token
         except OSError:
             return GLib.SOURCE_REMOVE
-        latest = None
-        for token in tail.map_tokens(lines):
-            latest = token
         if latest:
             self.apply_map_token(latest)
         return GLib.SOURCE_REMOVE
+
+
+# ------------------------------------------------------------ guardião de memória
+def memory_tick(pilot: DaemonPilot) -> str:
+    """Um tique do guardião de RAM: "ok", "collect" ou "restart".
+
+    Mantido como função de módulo para ser testável sem GLib. Com "restart"
+    apenas marca o pedido; quem agenda o tique (main) faz o encerramento
+    gracioso e sai com código de falha para o systemd religar o daemon.
+    """
+    rss = extra.read_process_rss_kib()
+    action = extra.daemon_memory_policy(rss)
+    if action == "collect":
+        gc.collect()
+    elif action == "restart":
+        pilot.restart_requested = True
+    return action
 
 
 class ControlServer:
@@ -520,6 +542,17 @@ def main(argv: list[str] | None = None) -> int:
         loop.quit()
         return GLib.SOURCE_REMOVE
 
+    def watch_memory() -> bool:
+        """Tique do guardião de RAM: sai com falha se o processo inflar.
+
+        O systemd (Restart=on-failure) religa o daemon limpo em segundos;
+        assim o monitor nunca chega a disputar RAM com o jogo.
+        """
+        if memory_tick(pilot) == "restart":
+            GLib.idle_add(shutdown)
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
     server.on_stop = lambda: GLib.idle_add(shutdown)
     for signal_number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         try:
@@ -529,6 +562,7 @@ def main(argv: list[str] | None = None) -> int:
 
     server.start()
     pilot.start()
+    GLib.timeout_add_seconds(60, watch_memory)
     print(
         f"MultiLUT daemon ativo (pid {os.getpid()}); socket: {server.socket_path}",
         flush=True,
@@ -537,7 +571,7 @@ def main(argv: list[str] | None = None) -> int:
         loop.run()
     except KeyboardInterrupt:
         shutdown()
-    return 0
+    return 1 if pilot.restart_requested else 0
 
 
 def notify_send_args(

@@ -2045,8 +2045,8 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         try:
             size = path.stat().st_size
             with path.open("rb") as stream:
-                stream.seek(max(0, size - 262144))
-                data = stream.read()
+                stream.seek(max(0, size - core.CONSOLE_READ_BLOCK))
+                data = stream.read(core.CONSOLE_READ_BLOCK)
         except OSError:
             return GLib.SOURCE_REMOVE
         parser = core.ConsoleTail()
@@ -2098,19 +2098,20 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             size = path.stat().st_size
             if size < tail.offset:
                 tail.reset()  # truncado: o jogo recriou o arquivo
-            lines: list[str] = []
+            # Orçamento de RAM por dreno: core.CONSOLE_DRAIN_BLOCKS x
+            # core.CONSOLE_READ_BLOCK (16 x 256 KB = 4 MB), igual ao daemon:
+            # linhas processadas bloco a bloco, só o último token sobrevive.
+            latest = None
             with path.open("rb") as stream:
                 stream.seek(tail.offset)
-                for _ in range(128):  # 128 x 256 KB = 32 MB por dreno, no máximo
-                    data = stream.read(262144)
+                for _ in range(core.CONSOLE_DRAIN_BLOCKS):
+                    data = stream.read(core.CONSOLE_READ_BLOCK)
                     if not data:
                         break
-                    lines.extend(tail.feed(data))
+                    for token in tail.map_tokens(tail.feed(data)):
+                        latest = token
         except OSError:
             return GLib.SOURCE_REMOVE
-        latest = None
-        for token in tail.map_tokens(lines):
-            latest = token
         if latest:
             profile = core.match_map_profile(latest)
             if profile is not None:

@@ -1030,6 +1030,23 @@ def match_map_profile(
     return None
 
 
+# ------------------------------------------------------------ console.log
+# Pico de leitura por evento do console.log: CONSOLE_DRAIN_BLOCKS blocos de
+# CONSOLE_READ_BLOCK bytes (16 x 256 KB = 4 MB por dreno, no máximo). O pico
+# baixo mantém a RAM do monitor longe do jogo; o que sobrar é lido no
+# evento seguinte (o debounce de 400 ms agrupa as escritas).
+CONSOLE_DRAIN_BLOCKS = 16
+CONSOLE_READ_BLOCK = 262144
+
+# Teto do fragmento parcial guardado no ConsoleTail. Linhas terminadas só em
+# "\r" (progresso do motor durante o load) nunca fecham um "\n" e inflariam
+# esse buffer sem limite, inchando o processo em segundo plano durante o jogo.
+# Passando do teto, o prefixo velho é descartado e fica só a cauda recente:
+# as linhas de mapa são curtas e sempre aparecem no fim do que foi escrito.
+CONSOLE_BUFFER_LIMIT = 1048576
+CONSOLE_BUFFER_KEEP = 65536
+
+
 class ConsoleTail:
     """Leitor incremental de console.log por deslocamento de bytes.
 
@@ -1051,6 +1068,10 @@ class ConsoleTail:
             return []
         self.offset += len(data)
         self._buffer += data
+        if len(self._buffer) > CONSOLE_BUFFER_LIMIT:
+            # log sem "\n" (só "\r"): descarta o prefixo velho em vez de crescer
+            # sem limite; o offset já avançou, nada é relido
+            self._buffer = self._buffer[-CONSOLE_BUFFER_KEEP:]
         chunks = self._buffer.split(b"\n")
         self._buffer = chunks.pop()
         lines: list[str] = []
