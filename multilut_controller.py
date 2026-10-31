@@ -507,6 +507,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.maximize()
         GLib.timeout_add_seconds(2, self.refresh_game_status)
         GLib.timeout_add_seconds(6, self._check_updates_once)
+        GLib.timeout_add_seconds(3, self._ensure_daemon_once)
         self.start_file_monitor()
         self.start_console_monitor()
         if bool(self.config.get("global_shortcut", False)):
@@ -3033,6 +3034,34 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         if not self.config.get("check_updates", True):
             return GLib.SOURCE_REMOVE
         threading.Thread(target=self._updates_thread, daemon=True).start()
+        return GLib.SOURCE_REMOVE
+
+    def _ensure_daemon_once(self) -> bool:
+        """Garante o daemon (piloto sem janela) após a abertura.
+
+        Automatiza o passo que o diagnóstico pedia à mão
+        (multilut-ctl daemon install): em thread, sem bloquear a UI.
+        """
+        threading.Thread(target=self._daemon_autopilot_thread, daemon=True).start()
+        return GLib.SOURCE_REMOVE
+
+    def _daemon_autopilot_thread(self) -> None:
+        result = extra.ensure_daemon_autopilot()
+        GLib.idle_add(self._announce_daemon_autopilot, result)
+
+    def _announce_daemon_autopilot(self, result: tuple[bool, str]) -> bool:
+        """Avisa o resultado e, se o daemon assumiu, a janela vira observadora."""
+        ok, detail = result
+        if not ok:
+            self.toast(f"Daemon (piloto sem janela): {detail}", 6)
+        elif detail.startswith("Daemon iniciado"):
+            # daemon ativo: ele é quem aplica os mapas; solta o monitor interno
+            monitor = self._console_monitor
+            if monitor is not None:
+                monitor.cancel()
+                self._console_monitor = None
+            self._daemon_pilot_active = True
+            self.toast("Piloto por mapa ativo também com a janela fechada (daemon).")
         return GLib.SOURCE_REMOVE
 
     def _updates_thread(self) -> None:

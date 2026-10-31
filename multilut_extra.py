@@ -624,7 +624,8 @@ def diagnostic_report() -> list[dict]:
             {
                 "title": "Daemon (piloto sem janela)",
                 "state": "info",
-                "detail": "serviço instalado, parado; inicie com multilut-ctl daemon start",
+                "detail": "serviço instalado, parado; o aplicativo inicia "
+                "sozinho ao abrir (multilut-ctl daemon start para agora)",
             }
         )
     else:
@@ -632,8 +633,8 @@ def diagnostic_report() -> list[dict]:
             {
                 "title": "Daemon (piloto sem janela)",
                 "state": "info",
-                "detail": "opcional; instale com multilut-ctl daemon install "
-                "para o piloto funcionar sem a janela aberta",
+                "detail": "o aplicativo instala e inicia sozinho ao abrir; "
+                "se esta mensagem persistir, rode multilut-ctl daemon install",
             }
         )
 
@@ -905,6 +906,44 @@ def daemon_start() -> tuple[bool, str]:
             return True, "Daemon iniciado (piloto ativo sem janela)."
         time.sleep(0.1)
     return False, "O daemon não respondeu após o início."
+
+
+def ensure_daemon_unit(
+    app_dir: Path | None = None, unit_dir: Path | None = None
+) -> tuple[bool, str]:
+    """Garante a unidade systemd do daemon instalada (idempotente)."""
+    try:
+        if daemon_unit_installed(unit_dir):
+            return True, "Serviço já instalado."
+        daemon_install_unit(app_dir=app_dir, unit_dir=unit_dir)
+    except (OSError, ValueError) as exc:
+        return False, f"Falha ao instalar o serviço: {exc}"
+    return True, "Serviço instalado."
+
+
+def ensure_daemon_autopilot(
+    app_dir: Path | None = None,
+    unit_dir: Path | None = None,
+    start: bool = True,
+) -> tuple[bool, str]:
+    """Faz sozinho o que o diagnóstico pedia à mão (daemon install + start).
+
+    Instala a unidade do systemd se faltar, habilita-a na sessão
+    (sobrevive ao reboot) e inicia o daemon quando não está rodando;
+    assim o piloto por mapa funciona com a janela fechada sem exigir
+    comando manual. Nunca lança exceção: devolve (ok, detalhe).
+    """
+    ok, detail = ensure_daemon_unit(app_dir=app_dir, unit_dir=unit_dir)
+    if not ok:
+        return False, detail
+    # idempotente; sem systemctl disponível, segue só com a unidade pronta
+    daemon_systemctl("enable")
+    if not start or daemon_running():
+        return True, detail
+    started, start_detail = daemon_start()
+    if started:
+        return True, start_detail
+    return True, f"Serviço pronto, daemon não iniciou: {start_detail}"
 
 
 def daemon_stop() -> tuple[bool, str]:
