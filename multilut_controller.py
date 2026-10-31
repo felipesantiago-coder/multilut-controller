@@ -31,7 +31,6 @@ import multilut_atlas as atlas
 import multilut_core as core
 import multilut_extra as extra
 import multilut_preview as preview
-import multilut_tray as tray
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -580,7 +579,9 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         except (OSError, core.MultiLUTError):
             pass
         application = self.get_application()
-        tray_icon = getattr(application, "_tray", None) if application else None
+        tray_ready = (
+            bool(getattr(application, "_tray_running", False)) if application else False
+        )
         brightness = getattr(self, "_brightness", None)
         if brightness is not None and brightness.modified:
             try:
@@ -588,7 +589,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             except (OSError, ValueError):
                 pass
         if (
-            tray_icon is not None
+            tray_ready
             and bool(self.config.get("tray_hide_on_close", True))
             and not bool(self.config.get("quit_on_close", False))
         ):
@@ -2668,26 +2669,22 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         autostart_box.append(self.autostart_switch)
         page.append(autostart_box)
 
-        tray_supported = tray.tray_supported()
         tray_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         tray_title = Gtk.Label(
-            label="Ícone na bandeja (menu rápido: perfis, próximo/anterior, piloto)"
-            if tray_supported
-            else "Ícone na bandeja (requer libayatana-appindicator)",
+            label="Ícone na bandeja (menu rápido: perfis, próximo/anterior, piloto)",
             xalign=0,
         )
         tray_title.set_hexpand(True)
         tray_title.set_wrap(True)
         self.tray_switch = Gtk.Switch()
         self.tray_switch.set_active(bool(self.config.get("tray_enabled", True)))
-        self.tray_switch.set_sensitive(tray_supported)
+        self.tray_switch.set_sensitive(True)
         self.tray_switch.connect("state-set", self.on_tray_changed)
-        if not tray_supported:
-            self.tray_switch.set_tooltip_text(
-                "Instale libayatana-appindicator (Solus: sudo eopkg it "
-                "libayatana-appindicator-gtk3) e habilite a extensão "
-                "AppIndicator no GNOME"
-            )
+        self.tray_switch.set_tooltip_text(
+            "O indicador roda como processo auxiliar GTK3; exige "
+            "libayatana-appindicator e, no GNOME, a extensão AppIndicator — "
+            "o aplicativo avisa quando falta algo"
+        )
         tray_box.append(tray_title)
         tray_box.append(self.tray_switch)
         page.append(tray_box)
@@ -2703,7 +2700,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.tray_hide_switch.set_active(
             bool(self.config.get("tray_hide_on_close", True))
         )
-        self.tray_hide_switch.set_sensitive(tray_supported)
+        self.tray_hide_switch.set_sensitive(True)
         self.tray_hide_switch.connect("state-set", self.on_tray_hide_changed)
         tray_close_box.append(tray_close_title)
         tray_close_box.append(self.tray_hide_switch)
@@ -3705,7 +3702,7 @@ class MultiLUTApplication(Adw.Application):
     def __init__(self, start_minimized: bool = False):
         super().__init__(application_id=core.APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.start_minimized = start_minimized
-        self._tray = None
+        self._tray_running = False
         self._tray_env_done = False
         self.connect("activate", self.on_activate)
         undo = Gio.SimpleAction.new("undo-profile", GLib.VariantType.new("s"))
@@ -3729,26 +3726,56 @@ class MultiLUTApplication(Adw.Application):
 
     # ------------------------------------------------------------ bandeja (F9)
     def setup_tray(self, window) -> None:
-        """Cria ou remove o ícone da bandeja conforme o config."""
+        """Garante (ou encerra) o indicador da bandeja conforme o config.
+
+        O indicador vive em um processo auxiliar GTK3 (multilut_tray.py
+        --serve): o processo GTK4 desta janela não consegue carregar o
+        binding GTK3 do AppIndicator (Gtk.Menu não existe no GTK4 e a
+        namespace Gtk já está ocupada). Nenhum erro aqui pode impedir a
+        janela de abrir.
+        """
         enabled = bool(window.config.get("tray_enabled", True))
         if not enabled:
-            if self._tray is not None:
-                self._tray.destroy()
-                self._tray = None
-            return
-        if self._tray is not None:
-            self._refresh_tray(window)
-            return
-        if not tray.tray_supported():
-            self._schedule_tray_environment(window)
+            self._tray_running = False
+            try:
+                extra.stop_tray_process(timeout=0.5)
+            except Exception:  # nunca bloqueia a UI por causa da bandeja
+                pass
             return
         try:
-            self._tray = tray.TrayIcon()
-        except tray.TrayError as exc:
-            window.toast(str(exc), 8)
-            return
-        self._refresh_tray(window)
+            self._ensure_tray_process(window)
+        except Exception:
+            pass
         self._schedule_tray_environment(window)
+
+    def _ensure_tray_process(self, window) -> None:
+        """Processo auxiliar já vivo? Senão, sobe em thread (fora da UI)."""
+        if extra.tray_process_running():
+            self._tray_running = True
+            return
+        threading.Thread(
+            target=self._tray_process_thread, args=(window,), daemon=True
+        ).start()
+
+    def _tray_process_thread(self, window) -> None:
+        try:
+            ok, detail = extra.start_tray_process()
+        except Exception as exc:  # falha da bandeja nunca derruba o app
+            ok, detail = False, f"falha inesperada: {exc}"
+        GLib.idle_add(self._announce_tray_process, ok, detail)
+
+    def _announce_tray_process(self, ok: bool, detail: str) -> bool:
+        """Confirma a subida do indicador; orienta quando ele não sobe."""
+        self._tray_running = bool(ok)
+        window = self.props.active_window
+        if window is None:
+            return GLib.SOURCE_REMOVE
+        if ok:
+            if detail == extra.TRAY_STARTED_DETAIL:
+                window.toast("Indicador na bandeja iniciado.", 5)
+        else:
+            window.toast(f"Indicador na bandeja: {detail}", 8)
+        return GLib.SOURCE_REMOVE
 
     def _schedule_tray_environment(self, window) -> None:
         """Uma única verificação por sessão: garante o que o indicador precisa.
@@ -3782,19 +3809,20 @@ class MultiLUTApplication(Adw.Application):
         return GLib.SOURCE_REMOVE
 
     def _refresh_tray(self, window=None) -> None:
-        if self._tray is None:
-            return
+        """O auxiliar reconstrói o menu sozinho (lê config e histórico).
+
+        Mantido para os pontos que avisam mudanças de estado: garante
+        apenas que o processo do indicador exista (autocura quando ele
+        morre). Silencioso, pode ser chamado com a janela oculta.
+        """
         window = window or self.props.active_window
-        if window is None:
+        if window is None or not bool(window.config.get("tray_enabled", True)):
+            return
+        if self._tray_running and extra.tray_process_running():
             return
         try:
-            self._tray.update(
-                tray.build_menu_entries(
-                    recent_profiles=tray.recent_profiles(),
-                    pilot_on=bool(window.config.get("auto_map_switch", False)),
-                )
-            )
-        except (AttributeError, RuntimeError):
+            self._ensure_tray_process(window)
+        except Exception:
             pass
 
     def on_app_next_profile(self, _action, _parameter) -> None:
@@ -3818,6 +3846,12 @@ class MultiLUTApplication(Adw.Application):
             window.present()
 
     def on_app_quit(self, _action, _parameter) -> None:
+        """Sair de verdade: encerra também o indicador da bandeja."""
+        self._tray_running = False
+        try:
+            extra.stop_tray_process(timeout=0.4)
+        except Exception:
+            pass
         self.quit()
 
     def on_app_activate_profile(self, _action, parameter) -> None:

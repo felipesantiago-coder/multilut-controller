@@ -221,7 +221,10 @@ AUTOMACAO E INTEGRACAO
 - Icone na bandeja: com libayatana-appindicator (Solus: sudo eopkg it
   libayatana-appindicator-gtk3; no GNOME, ative a extensao AppIndicator), o
   app mostra um icone com menu rapido: perfis recentes, proximo/anterior,
-  pausar/retomar o piloto, abrir janela e sair. Com a bandeja ativa, fechar
+  pausar/retomar o piloto, abrir janela e sair. O indicador roda em um
+  processo auxiliar proprio (GTK3) porque a janela e GTK4: o app sobe, vigia
+  e reergue esse processo sozinho, e ele encerra junto quando o app sai da
+  sessao. Com a bandeja ativa, fechar
   a janela oculta o app (continua trocando perfis); desligue "Continuar
   rodando na bandeja" na pagina Sistema para fechar de verdade. Interruptor
   na pagina Sistema liga/desliga o icone na hora.

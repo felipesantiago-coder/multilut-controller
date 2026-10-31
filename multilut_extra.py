@@ -13,9 +13,11 @@ import os
 import platform
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import zipfile
 from datetime import datetime
@@ -1059,13 +1061,24 @@ def _shell_extension_uuids(raw: str) -> list[str]:
 
 
 def tray_binding_status() -> tuple[bool, str]:
-    """Binding do AppIndicator disponível? (lazy: não exige gi no import)."""
+    """Binding do AppIndicator verificável em um processo limpo.
+
+    Dentro do processo GTK4 da janela o binding GTK3 não carrega (a
+    namespace Gtk já está ocupada pela 4.0), então a checagem roda em um
+    interpretador separado — o mesmo ambiente do processo auxiliar que
+    vai desenhar o indicador de verdade.
+    """
     try:
-        import multilut_tray as tray
-    except (ImportError, ValueError, SystemExit):
-        return False, f"multilut_tray indisponível; {TRAY_BINDING_HINT}"
-    if tray.tray_supported():
-        return True, "libayatana-appindicator (ou AppIndicator3) disponível"
+        proc = subprocess.run(
+            [_python_executable(), "-c", TRAY_BINDING_CHECK],
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"não deu para verificar o binding: {exc}; {TRAY_BINDING_HINT}"
+    if proc.returncode == 0:
+        return True, "libayatana-appindicator (GTK3) disponível"
     return False, TRAY_BINDING_HINT
 
 
@@ -1170,6 +1183,171 @@ def tray_doctor_status() -> tuple[str, str]:
     if state == "unknown":
         return "info", detail
     return "warn", detail
+
+
+# ------------------------------------------- processo auxiliar da bandeja
+# O indicador roda FORA do processo GTK4 da janela: o binding GTK3 do
+# AppIndicator não carrega junto com GTK4 (namespace Gtk já ocupada).
+# multilut_tray.py --serve é um processo separado, independente da
+# janela, que lê config/histórico e aciona as ações do app por D-Bus.
+
+TRAY_PID_NAME = "tray.pid"
+TRAY_LOG_NAME = "tray.log"
+TRAY_STARTED_DETAIL = "Indicador da bandeja iniciado."
+TRAY_RUNNING_DETAIL = "O indicador da bandeja já está em execução."
+
+# Roda em um interpretador limpo: replica _import_indicator de
+# multilut_tray sem importar GTK na sessão de quem pergunta.
+TRAY_BINDING_CHECK = """import sys
+import gi
+ok = False
+for name in ("AyatanaAppIndicator3", "AppIndicator3"):
+    try:
+        gi.require_version(name, "0.1")
+        __import__("gi.repository." + name, fromlist=[name])
+        ok = True
+        break
+    except (ValueError, ImportError):
+        continue
+sys.exit(0 if ok else 1)
+"""
+
+_TRAY_SPAWN_LOCK = threading.Lock()
+
+
+def _python_executable() -> str:
+    """Interpretador com o gi do sistema (o app sempre roda com ele)."""
+    return "/usr/bin/python3" if Path("/usr/bin/python3").is_file() else "python3"
+
+
+def tray_pid_file(state_dir: Path | None = None) -> Path:
+    """Arquivo de PID do processo auxiliar da bandeja (no estado XDG)."""
+    return (state_dir or core.app_state_dir()) / TRAY_PID_NAME
+
+
+def tray_log_file(state_dir: Path | None = None) -> Path:
+    """Log do processo auxiliar (stdout+stderr), para diagnóstico."""
+    return (state_dir or core.app_state_dir()) / TRAY_LOG_NAME
+
+
+def _pid_alive(pid: int) -> bool:
+    """Processo existe? (os.kill com sinal 0; erros viram False)."""
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # vivo, mas de outro usuário
+    except OSError:
+        return False
+    return True
+
+
+def _cmdline_mentions_tray(pid: int, proc_root: Path = Path("/proc")) -> bool:
+    """Evita PID reutilizado por outro programa: o cmdline cita o auxiliar.
+
+    Sem /proc (não-Linux) ou cmdline ilegível, assume que está vivo —
+    melhor um falso positivo do que apagar um indicador real.
+    """
+    try:
+        raw = (proc_root / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return True
+    if not raw:
+        return True
+    return b"multilut_tray" in raw
+
+
+def tray_process_running(pid_file: Path | None = None) -> bool:
+    """Processo auxiliar da bandeja está vivo? (barato; nunca lança)."""
+    pid_file = pid_file or tray_pid_file()
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    if not _pid_alive(pid):
+        return False
+    return _cmdline_mentions_tray(pid)
+
+
+def start_tray_process(app_dir: Path | None = None) -> tuple[bool, str]:
+    """Sobe o processo auxiliar do indicador (idempotente; nunca lança).
+
+    Antes de spawnar, confirma o binding em um processo limpo — sem o
+    AppIndicator instalado o auxiliar só morreria com o código 3.
+    """
+    with _TRAY_SPAWN_LOCK:
+        pid_file = tray_pid_file()
+        if tray_process_running(pid_file):
+            return True, TRAY_RUNNING_DETAIL
+        binding_ok, binding_detail = tray_binding_status()
+        if not binding_ok:
+            return False, binding_detail
+        app_dir = app_dir or core.app_repo_dir()
+        script = app_dir / "multilut_tray.py"
+        if not script.is_file():
+            return False, f"multilut_tray.py não encontrado em {app_dir}."
+        log_file = tray_log_file()
+        try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_file, "ab") as log:
+                proc = subprocess.Popen(
+                    [_python_executable(), str(script), "--serve"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=log,
+                    start_new_session=True,
+                    cwd=str(app_dir),
+                )
+        except OSError as exc:
+            return False, f"Não foi possível iniciar o indicador: {exc}"
+        try:
+            core._atomic_write(pid_file, f"{proc.pid}\n", 0o644)
+        except OSError:
+            pass
+        return True, TRAY_STARTED_DETAIL
+
+
+def stop_tray_process(pid_file: Path | None = None, timeout: float = 1.0) -> bool:
+    """Encerra o processo auxiliar (SIGTERM → espera → SIGKILL); nunca lança."""
+    pid_file = pid_file or tray_pid_file()
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return True  # nada registrado a parar
+    if not tray_process_running(pid_file):
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
+        return True
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (OSError, ValueError):
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
+        return True
+    deadline = time.monotonic() + max(timeout, 0.0)
+    alive = True
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            alive = False
+            break
+        time.sleep(0.05)
+    if alive and _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+    try:
+        pid_file.unlink()
+    except OSError:
+        pass
+    return True
 
 
 # ------------------------------------------------------------ autostart na sessão
