@@ -234,6 +234,7 @@ date -u +%s > "$MULTILUT_TEST_APP_DIR/install_stamp"
                      {
                          "MULTILUT_TEST_APP_DIR": str(app_dir),
                          "SOURCE_DIR": str(repo),
+                         "XDG_STATE_HOME": str(base / "state"),
                      },
                  ):
                 result = core.apply_update_tarball(timeout=30.0)
@@ -244,6 +245,9 @@ date -u +%s > "$MULTILUT_TEST_APP_DIR/install_stamp"
             self.assertEqual(
                 (app_dir / "source_commit").read_text(encoding="utf-8").strip(), sha
             )
+            # a geração do código é registrada para os demais processos
+            generation = base / "state" / "multilut-controller" / "update_generation"
+            self.assertEqual(generation.read_text(encoding="utf-8").strip(), sha)
 
     def test_download_falho_reporta_erro(self):
         with mock.patch.object(core, "installed_commit", return_value="abc"), \
@@ -286,6 +290,7 @@ class InstallShMarkerTests(unittest.TestCase):
                 {
                     "HOME": str(base),
                     "XDG_DATA_HOME": str(data_root),
+                    "XDG_STATE_HOME": str(base / "state"),
                 }
             )
             repo = Path(__file__).resolve().parent.parent
@@ -310,6 +315,10 @@ class InstallShMarkerTests(unittest.TestCase):
             self.assertEqual(
                 (app_dir / "source_commit").read_text(encoding="utf-8").strip(), head
             )
+            # a instalação registra a geração do código (processos velhos se
+            # reiniciam sozinhos ao perceber a mudança)
+            generation = base / "state" / "multilut-controller" / "update_generation"
+            self.assertEqual(generation.read_text(encoding="utf-8").strip(), head)
 
 
 if __name__ == "__main__":

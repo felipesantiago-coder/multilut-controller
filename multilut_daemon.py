@@ -444,6 +444,39 @@ def memory_tick(pilot: DaemonPilot) -> str:
     return action
 
 
+# ------------------------------------------------------------ verificador de atualizações
+def update_tick(pilot: DaemonPilot) -> str:
+    """Um tique do verificador de atualizações: "idle", "busy" ou "restart".
+
+    O daemon roda 24/7: é ele quem garante que correções cheguem mesmo sem
+    o aplicativo ser aberto. Aplica com o mesmo lock da janela e, com
+    "restart", apenas marca o pedido — quem agenda o tique (main) faz o
+    encerramento gracioso e sai com código de falha para o systemd religar
+    o daemon já no código novo. Função de módulo para ser testável sem
+    GLib nem rede.
+    """
+    if not bool(core.load_config().get("check_updates", True)):
+        return "idle"
+    if core.read_update_generation() != core.process_update_generation():
+        # outro componente (janela ou install.sh) aplicou código novo:
+        # religar já traz o código novo; rede nem é necessária
+        pilot.restart_requested = True
+        return "restart"
+    result = core.check_for_updates()
+    if result.get("status") != "available":
+        return "idle"
+    if not core.acquire_update_lock():
+        return "busy"  # a janela está aplicando; a próxima verificação decide
+    try:
+        applied = core.apply_update()
+    finally:
+        core.release_update_lock()
+    if applied.get("ok") and applied.get("new_head") != applied.get("old_head"):
+        pilot.restart_requested = True
+        return "restart"
+    return "idle"
+
+
 class ControlServer:
     """Socket UNIX JSON-por-linha; uma requisição por conexão."""
 
@@ -553,6 +586,26 @@ def main(argv: list[str] | None = None) -> int:
             return GLib.SOURCE_REMOVE
         return GLib.SOURCE_CONTINUE
 
+    def watch_updates() -> bool:
+        """Verificação de atualizações com a rede fora do loop principal.
+
+        Primeira checagem 2 min após o arranque e depois a cada
+        core.UPDATE_RECHECK_SECONDS. Com "restart", encerra gracioso para
+        o systemd religar o daemon no código novo — é assim que correções
+        chegam sozinhas mesmo sem o aplicativo nunca ser aberto.
+        """
+        def worker() -> None:
+            try:
+                action = update_tick(pilot)
+            except Exception:  # noqa: BLE001 - rede/trabalho nunca derruba o daemon
+                return
+            if action == "restart":
+                GLib.idle_add(shutdown)
+
+        threading.Thread(target=worker, daemon=True).start()
+        GLib.timeout_add_seconds(core.UPDATE_RECHECK_SECONDS, watch_updates)
+        return GLib.SOURCE_REMOVE
+
     server.on_stop = lambda: GLib.idle_add(shutdown)
     for signal_number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         try:
@@ -562,7 +615,9 @@ def main(argv: list[str] | None = None) -> int:
 
     server.start()
     pilot.start()
+    core.process_update_generation()  # fixa a geração do código no arranque
     GLib.timeout_add_seconds(60, watch_memory)
+    GLib.timeout_add_seconds(120, watch_updates)
     print(
         f"MultiLUT daemon ativo (pid {os.getpid()}); socket: {server.socket_path}",
         flush=True,

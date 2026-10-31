@@ -36,6 +36,16 @@ elif [ -f "$SOURCE_DIR/source_commit" ]; then
 fi
 date -u +%s > "$APP_DIR/install_stamp"
 
+# Geração do código: a janela e o daemon que já estão rodando comparam a
+# geração que viram no arranque com esta; mudou, eles se reiniciam sozinhos
+# para rodar o código novo — ninguém precisa fechar nada na mão.
+STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}"
+if [ -s "$APP_DIR/source_commit" ]; then
+  mkdir -p "$STATE_ROOT/multilut-controller" 2>/dev/null || true
+  cp "$APP_DIR/source_commit" \
+     "$STATE_ROOT/multilut-controller/update_generation" 2>/dev/null || true
+fi
+
 BIN_DIR="$DATA_ROOT/bin"
 mkdir -p "$BIN_DIR"
 cp "$SOURCE_DIR/multilut_ctl.py" "$BIN_DIR/multilut-ctl"

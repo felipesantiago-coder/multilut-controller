@@ -407,6 +407,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         # autoatualização: aplica sozinho, sem diálogo nem clique
         self._update_applying = False
         self._auto_update_flow = False
+        # geração do código vista neste processo: se ela mudar no disco
+        # (a janela, o daemon ou o install.sh aplicaram atualização), a
+        # verificação periódica reinicia o app sozinha para rodar o novo
+        core.process_update_generation()
         # último perfil ativo visto no shader (a verdade vem do arquivo,
         # não do que a janela aplicou por último — o daemon escreve por fora)
         self._last_seen_active = None
@@ -3093,6 +3097,13 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
     def _announce_update(self, result: dict, auto: bool = False) -> bool:
         status = result.get("status")
+        if result.get("stale_process") and not self._update_applying:
+            # a janela, o daemon ou o install.sh aplicou código novo por fora:
+            # este processo ficou velho — reinicia sozinho para rodá-lo
+            self._update_requested = False
+            self.toast("Código novo no disco; reiniciando o aplicativo…", 5)
+            self.restart_application()
+            return GLib.SOURCE_REMOVE
         if status == "current":
             if self._update_requested:
                 self.toast(f"Você já está na versão mais recente (v{core.APP_VERSION}).")
@@ -3168,8 +3179,30 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         threading.Thread(target=self._update_apply_thread, daemon=True).start()
 
     def _update_apply_thread(self) -> None:
-        result = core.apply_update()
+        if not core.acquire_update_lock():
+            # a janela e o daemon dividem o mesmo lock: quem chegou primeiro
+            # aplica; daqui a pouco esta janela reverifica e se reinicia
+            # caso o código novo já esteja no disco
+            GLib.idle_add(self._update_apply_busy)
+            return
+        try:
+            result = core.apply_update()
+        finally:
+            core.release_update_lock()
         GLib.idle_add(self._update_apply_done, result)
+
+    def _update_apply_busy(self) -> bool:
+        self._update_applying = False
+        if hasattr(self, "update_apply_button"):
+            self.update_apply_button.set_sensitive(True)
+        self.toast("Outra parte do app já está aplicando a atualização.", 6)
+        GLib.timeout_add_seconds(90, self._recheck_after_busy)
+        return GLib.SOURCE_REMOVE
+
+    def _recheck_after_busy(self) -> bool:
+        if not self._update_applying:
+            threading.Thread(target=self._updates_thread, daemon=True).start()
+        return GLib.SOURCE_REMOVE
 
     def _update_apply_done(self, result: dict) -> bool:
         self._update_applying = False

@@ -633,6 +633,115 @@ def git_remote_head(repo: Path | None = None, timeout: float = 10.0) -> str | No
 # aplica sozinho o que vier do main, sem diálogo nem clique do usuário.
 UPDATE_RECHECK_SECONDS = 1800
 
+# Lock compartilhado entre janela e daemon: nunca puxar ao mesmo tempo
+# (index.lock do git / trabalho dobrado). Um lock velho — processo que
+# morreu no meio do pull — é roubado depois deste tempo sem movimento.
+UPDATE_LOCK_STALE_SECONDS = 900
+
+
+def update_lock_path() -> Path:
+    """Arquivo de lock da atualização (no estado do app, fora do repositório)."""
+    return app_state_dir() / "update.lock"
+
+
+def acquire_update_lock() -> bool:
+    """Reserva a atualização para este processo (O_CREAT|O_EXCL).
+
+    Janela e daemon dividem o mesmo lock: quem chega primeiro aplica; o
+    outro recebe False e fica para a próxima verificação. Lock velho é
+    roubado após UPDATE_LOCK_STALE_SECONDS para nunca travar para sempre.
+    """
+    path = update_lock_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    for _ in range(2):
+        try:
+            handle = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                age = datetime.now(timezone.utc).timestamp() - path.stat().st_mtime
+            except OSError:
+                return False
+            if age <= UPDATE_LOCK_STALE_SECONDS:
+                return False
+            try:
+                path.unlink()
+            except OSError:
+                return False
+            continue  # lock velho roubado; tenta criar de novo
+        except OSError:
+            return False
+        try:
+            os.write(handle, f"{os.getpid()}\n".encode("utf-8"))
+        except OSError:
+            pass
+        finally:
+            os.close(handle)
+        return True
+    return False
+
+
+def release_update_lock() -> None:
+    """Solta o lock da atualização; silencioso quando não existe."""
+    try:
+        update_lock_path().unlink()
+    except OSError:
+        pass
+
+
+def update_generation_path() -> Path:
+    """Marcação da geração do código no disco (commit aplicado por último).
+
+    É o passo de mão entre os processos: quando a janela, o daemon ou o
+    install.sh aplicam código novo, a geração muda no estado do app e os
+    demais processos percebem na verificação seguinte — cada um reinicia
+    sozinho para rodar o código novo sem ninguém pedir nada.
+    """
+    return app_state_dir() / "update_generation"
+
+
+def read_update_generation() -> str:
+    """Geração do código no disco; "" enquanto não houve atualização."""
+    try:
+        return update_generation_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def write_update_generation(head: str) -> None:
+    """Registra a geração do código pós-atualização (falha silenciosa)."""
+    try:
+        path = update_generation_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(head).strip() + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+_PROCESS_GENERATION: str | None = None
+
+
+def process_update_generation() -> str:
+    """Geração do código vista no arranque do processo (lida uma única vez).
+
+    Referência do "este processo está velho?": se a geração no disco mudar
+    depois do arranque, o processo está rodando código antigo e deve se
+    reiniciar. Lida sob demanda e cacheada; ``reset_process_generation_cache``
+    existe para os testes.
+    """
+    global _PROCESS_GENERATION
+    if _PROCESS_GENERATION is None:
+        _PROCESS_GENERATION = read_update_generation()
+    return _PROCESS_GENERATION
+
+
+def reset_process_generation_cache() -> None:
+    """Descarta a geração pinada (uso dos testes)."""
+    global _PROCESS_GENERATION
+    _PROCESS_GENERATION = None
+
 
 def check_for_updates(repo: Path | None = None, timeout: float = 6.0) -> dict:
     """Decide se há versão nova no repositório, com ou sem release publicada.
@@ -656,6 +765,12 @@ def check_for_updates(repo: Path | None = None, timeout: float = 6.0) -> dict:
         "message": "Não foi possível verificar atualizações agora.",
         "commit_message": "",
     }
+    # O código no disco mudou desde o arranque deste processo (a janela, o
+    # daemon ou o install.sh aplicaram uma atualização): este processo
+    # ficou velho mesmo que o repositório já esteja em dia.
+    result["stale_process"] = (
+        process_update_generation() != read_update_generation()
+    )
     local = installed_commit(repo)
     result["local"] = local
     remote: str | None
@@ -741,9 +856,10 @@ def apply_update(repo: Path | None = None, timeout: float = 90.0) -> dict:
             "old_head": old_head,
             "new_head": new_head,
         }
+    write_update_generation(new_head)  # os demais processos se religam sozinhos
     return {
         "ok": True,
-        "message": f"Atualizado: {old_head} -> {new_head}. Reinicie o aplicativo.",
+        "message": f"Atualizado: {old_head} -> {new_head}.",
         "old_head": old_head,
         "new_head": new_head,
     }
@@ -833,9 +949,13 @@ def apply_update_tarball(timeout: float = 120.0) -> dict:
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     new_head = sha[:7] if sha else None
+    if sha:
+        # Mesmo conteúdo que o install.sh novo acabou de gravar (sha cheio):
+        # reescrita idempotente, sem gerar falsa mudança de geração.
+        write_update_generation(sha)
     return {
         "ok": True,
-        "message": f"Atualizado para {new_head or 'main'}. Reinicie o aplicativo.",
+        "message": f"Atualizado para {new_head or 'main'}.",
         "old_head": old_head,
         "new_head": new_head,
     }
