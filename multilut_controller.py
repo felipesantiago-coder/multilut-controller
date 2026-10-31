@@ -3593,6 +3593,7 @@ class MultiLUTApplication(Adw.Application):
         super().__init__(application_id=core.APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.start_minimized = start_minimized
         self._tray = None
+        self._tray_env_done = False
         self.connect("activate", self.on_activate)
         undo = Gio.SimpleAction.new("undo-profile", GLib.VariantType.new("s"))
         undo.connect("activate", self.on_undo_profile)
@@ -3626,6 +3627,7 @@ class MultiLUTApplication(Adw.Application):
             self._refresh_tray(window)
             return
         if not tray.tray_supported():
+            self._schedule_tray_environment(window)
             return
         try:
             self._tray = tray.TrayIcon()
@@ -3633,6 +3635,38 @@ class MultiLUTApplication(Adw.Application):
             window.toast(str(exc), 8)
             return
         self._refresh_tray(window)
+        self._schedule_tray_environment(window)
+
+    def _schedule_tray_environment(self, window) -> None:
+        """Uma única verificação por sessão: garante o que o indicador precisa.
+
+        Em thread (gnome-extensions/gsettings podem demorar); nunca bloqueia
+        a UI e só avisa quando muda algo ou quando falta o que o app não
+        consegue resolver sem sudo.
+        """
+        if self._tray_env_done:
+            return
+        self._tray_env_done = True
+        threading.Thread(
+            target=self._tray_environment_thread, args=(window,), daemon=True
+        ).start()
+
+    def _tray_environment_thread(self, window) -> None:
+        result = extra.ensure_tray_environment()
+        GLib.idle_add(self._announce_tray_environment, result)
+
+    def _announce_tray_environment(self, result: tuple[bool, str]) -> bool:
+        """Avisa ativação de extensão ou orienta quando falta algo (uma vez)."""
+        ok, detail = result
+        window = self.props.active_window
+        if window is None:
+            return GLib.SOURCE_REMOVE
+        if ok:
+            if detail.startswith("extensão AppIndicator ativada"):
+                window.toast(f"{detail}: o ícone deve aparecer na bandeja.", 6)
+        else:
+            window.toast(f"Indicador na bandeja: {detail}", 8)
+        return GLib.SOURCE_REMOVE
 
     def _refresh_tray(self, window=None) -> None:
         if self._tray is None:

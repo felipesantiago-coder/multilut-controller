@@ -66,13 +66,37 @@ if python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("
   printf '%s\n' "MultiLUT Controller instalado com sucesso."
   printf '%s\n' "Abra-o pelo ícone da área de trabalho ou pelo menu de aplicativos."
   printf '%s\n' "CLI instalada em $BIN_DIR/multilut-ctl (use: multilut-ctl --help)."
-  printf '%s\n' "Piloto sem janela (daemon): multilut-ctl daemon install"
+  printf '%s\n' "Piloto sem janela (daemon): instalado e iniciado automaticamente pelo app."
   printf '%s\n' "Iniciar com a sessão: multilut-ctl autostart on"
   if python3 -c 'import numpy, PIL' >/dev/null 2>&1; then
     printf '%s\n' "Simulação de LUT pronta (numpy + Pillow encontrados)."
   else
     printf '%s\n' "Dica: para a pré-visualização de LUT, instale numpy e Pillow:"
     printf '%s\n' "  sudo eopkg it numpy python-pillow"
+  fi
+  # Indicador de bandeja: binding do AppIndicator não dá para instalar sem
+  # sudo; o install.sh é o único momento em que o app consegue buscar isso.
+  if ! python3 -c 'import gi; gi.require_version("AyatanaAppIndicator3", "0.1")' >/dev/null 2>&1 \
+     && ! python3 -c 'import gi; gi.require_version("AppIndicator3", "0.1")' >/dev/null 2>&1; then
+    printf '%s\n' "Para o indicador de bandeja (menu rápido com a janela fechada) falta o"
+    printf '%s\n' "suporte a AppIndicator."
+    if command -v eopkg >/dev/null 2>&1 && [ -t 0 ]; then
+      printf '%s' "Instalar agora (sudo eopkg it libayatana-appindicator-gtk3)? [s/N] "
+      resposta=""
+      read -r resposta || resposta=""
+      case "$resposta" in
+        s|S|sim|Sim|SIM)
+          if sudo eopkg it libayatana-appindicator-gtk3; then
+            printf '%s\n' "Suporte ao indicador instalado."
+          else
+            printf '%s\n' "Não foi possível instalar agora; rode manualmente:"
+            printf '%s\n' "  sudo eopkg it libayatana-appindicator-gtk3"
+          fi
+          ;;
+      esac
+    else
+      printf '%s\n' "  Solus: sudo eopkg it libayatana-appindicator-gtk3"
+    fi
   fi
 else
   printf '%s\n' "O aplicativo foi instalado, mas faltam dependências gráficas."

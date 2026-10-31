@@ -638,6 +638,9 @@ def diagnostic_report() -> list[dict]:
             }
         )
 
+    state, detail = tray_doctor_status()
+    items.append({"title": "Ícone na bandeja (indicador)", "state": state, "detail": detail})
+
     state, detail = preview_stack_status()
     items.append({"title": "Simulação de LUT (Pillow/numpy)", "state": state, "detail": detail})
 
@@ -965,6 +968,143 @@ def daemon_stop() -> tuple[bool, str]:
             return True, "Daemon parado." if stopped else "Daemon parado (serviço do systemd)."
         time.sleep(0.1)
     return False, "O daemon continua respondendo; verifique systemctl --user status multilut-daemon."
+
+
+# ------------------------------------------- ambiente do indicador de bandeja
+# O indicador (menu rápido com a janela fechada) precisa de duas coisas:
+# 1) binding Python do AppIndicator (libayatana-appindicator; pacote da distro,
+#    requer sudo) e 2) no GNOME, a extensão AppIndicator ativa — essa o app
+#    consegue ativar sozinho (gnome-extensions enable, sem sudo).
+GNOME_APPINDICATOR_UUID = "appindicatorsupport@rgcjonas.gmail.com"
+TRAY_BINDING_HINT = (
+    "instale libayatana-appindicator (Solus: sudo eopkg it "
+    "libayatana-appindicator-gtk3) ou rode ./install.sh"
+)
+
+
+def _shell_extension_uuids(raw: str) -> list[str]:
+    """Converte a saída de `gsettings get` ('@as []' ou "['a@x', 'b@y']")."""
+    text = raw.strip()
+    if text.startswith("@as"):
+        text = text[3:].strip()
+    text = text.strip("[]")
+    if not text:
+        return []
+    return [item.strip().strip("'\"") for item in text.split(",") if item.strip()]
+
+
+def tray_binding_status() -> tuple[bool, str]:
+    """Binding do AppIndicator disponível? (lazy: não exige gi no import)."""
+    try:
+        import multilut_tray as tray
+    except (ImportError, ValueError, SystemExit):
+        return False, f"multilut_tray indisponível; {TRAY_BINDING_HINT}"
+    if tray.tray_supported():
+        return True, "libayatana-appindicator (ou AppIndicator3) disponível"
+    return False, TRAY_BINDING_HINT
+
+
+def gnome_appindicator_status() -> tuple[str, str]:
+    """Estado da extensão AppIndicator no GNOME.
+
+    Devolve (estado, detalhe) com estado em: no-gnome, unknown, missing,
+    disabled ou enabled. Com enabled-extensions vazio (padrão '@as []'),
+    todas as extensões instaladas estão ativas exceto as de
+    disabled-extensions — regra oficial do GNOME Shell.
+    """
+    desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
+    if "gnome" not in desktop:
+        return (
+            "no-gnome",
+            "ambiente não-GNOME (o shell já mostra indicadores StatusNotifier)",
+        )
+    try:
+        info = subprocess.run(
+            ["gnome-extensions", "info", GNOME_APPINDICATOR_UUID],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown", "não foi possível verificar a extensão (gnome-extensions indisponível)"
+    if info.returncode != 0:
+        return "missing", (
+            f"extensão AppIndicator não instalada ({GNOME_APPINDICATOR_UUID}); "
+            "instale pelo extensions.gnome.org ou pelo pacote da sua distro"
+        )
+    try:
+        enabled = subprocess.run(
+            ["gsettings", "get", "org.gnome.shell", "enabled-extensions"],
+            capture_output=True, text=True, timeout=10.0,
+        ).stdout
+        disabled = subprocess.run(
+            ["gsettings", "get", "org.gnome.shell", "disabled-extensions"],
+            capture_output=True, text=True, timeout=10.0,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return "enabled", "extensão AppIndicator instalada (estado presumido ativo)"
+    enabled_ids = _shell_extension_uuids(enabled)
+    disabled_ids = _shell_extension_uuids(disabled)
+    if GNOME_APPINDICATOR_UUID in enabled_ids or (
+        not enabled_ids and GNOME_APPINDICATOR_UUID not in disabled_ids
+    ):
+        return "enabled", "extensão AppIndicator instalada e ativa"
+    return "disabled", "extensão AppIndicator instalada, mas desativada"
+
+
+def _gnome_extension_enable() -> tuple[bool, str]:
+    """Ativa a extensão AppIndicator (sem sudo); (False, motivo) ao falhar."""
+    try:
+        proc = subprocess.run(
+            ["gnome-extensions", "enable", GNOME_APPINDICATOR_UUID],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"gnome-extensions enable falhou: {exc}"
+    return proc.returncode == 0, (proc.stderr or "").strip()
+
+
+def ensure_tray_environment() -> tuple[bool, str]:
+    """Busca sozinho o que falta para o indicador (sem sudo; nunca lança).
+
+    - binding ausente: não dá para resolver sem sudo; devolve o comando.
+    - extensão GNOME instalada e desativada: ativa e confirma.
+    - extensão ausente: orientação de instalação.
+    """
+    binding_ok, binding_detail = tray_binding_status()
+    if not binding_ok:
+        return False, binding_detail
+    state, detail = gnome_appindicator_status()
+    if state == "disabled":
+        enabled, enable_detail = _gnome_extension_enable()
+        if not enabled:
+            return False, f"não consegui ativar: {detail} ({enable_detail})"
+        state, detail = gnome_appindicator_status()
+        if state == "enabled":
+            return True, "extensão AppIndicator ativada agora"
+        return False, f"ativação não confirmada: {detail}"
+    if state == "missing":
+        return False, detail
+    return True, "indicador pronto (AppIndicator + shell)"
+
+
+def tray_doctor_status() -> tuple[str, str]:
+    """Item do doctor: o que o indicador precisa e o que o app resolve sozinho."""
+    binding_ok, binding_detail = tray_binding_status()
+    if not binding_ok:
+        return "warn", binding_detail
+    state, detail = gnome_appindicator_status()
+    if state == "enabled":
+        return "ok", f"{detail}; binding disponível"
+    if state == "no-gnome":
+        return "ok", f"binding disponível; {detail}"
+    if state == "disabled":
+        return "info", f"{detail}; o aplicativo ativa sozinho ao abrir"
+    if state == "unknown":
+        return "info", detail
+    return "warn", detail
 
 
 # ------------------------------------------------------------ autostart na sessão
