@@ -15,7 +15,7 @@ Uso:
   multilut-ctl rows                    Lista as linhas do atlas e quem as usa
   multilut-ctl atlas <linha> <arquivo> Substitui a linha do atlas por um .cube
   multilut-ctl reindex <perfil> <linha>  Aponta o perfil para outra linha
-  multilut-ctl daemon status|start|stop|install|uninstall
+  multilut-ctl daemon status|start|stop|restart|install|uninstall
                                        Piloto automático como serviço sem janela
   multilut-ctl autostart on|off|status Inicia o app com a sessão (janela oculta)
   multilut-ctl update check|apply      Verifica/aplica atualização do repositório
@@ -245,6 +245,12 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         ok, message = extra.daemon_stop()
         print(message)
         return 0 if ok else 1
+    if action == "restart":
+        # religa o daemon com o código atual (ex.: após instalar atualização)
+        ok_stop, _ = extra.daemon_stop()
+        ok_start, message = extra.daemon_start()
+        print(message)
+        return 0 if ok_start else 1
     if action == "install":
         unit = extra.daemon_install_unit()
         print(f"Serviço instalado: {unit}")
@@ -739,8 +745,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     daemon_parser.add_argument(
         "acao",
-        choices=("status", "start", "stop", "install", "uninstall"),
-        help="status | start | stop | install (serviço systemd) | uninstall",
+        choices=("status", "start", "stop", "restart", "install", "uninstall"),
+        help="status | start | stop | restart | install (serviço systemd) | uninstall",
     )
     daemon_parser.set_defaults(func=cmd_daemon)
 

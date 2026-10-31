@@ -629,6 +629,11 @@ def git_remote_head(repo: Path | None = None, timeout: float = 10.0) -> str | No
     return None
 
 
+# Intervalo da reverificação automática de atualizações (30 min): o app
+# aplica sozinho o que vier do main, sem diálogo nem clique do usuário.
+UPDATE_RECHECK_SECONDS = 1800
+
+
 def check_for_updates(repo: Path | None = None, timeout: float = 6.0) -> dict:
     """Decide se há versão nova no repositório, com ou sem release publicada.
 

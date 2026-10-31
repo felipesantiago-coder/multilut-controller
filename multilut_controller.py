@@ -404,6 +404,12 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self._help_window = None
         self._update_requested = False
         self._pending_release = None
+        # autoatualização: aplica sozinho, sem diálogo nem clique
+        self._update_applying = False
+        self._auto_update_flow = False
+        # último perfil ativo visto no shader (a verdade vem do arquivo,
+        # não do que a janela aplicou por último — o daemon escreve por fora)
+        self._last_seen_active = None
         # autostart da sessão (evita recursão do switch)
         self._autostart_programmatic = False
         # atalho global (portal)
@@ -507,6 +513,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.maximize()
         GLib.timeout_add_seconds(2, self.refresh_game_status)
         GLib.timeout_add_seconds(6, self._check_updates_once)
+        GLib.timeout_add_seconds(core.UPDATE_RECHECK_SECONDS, self._check_updates_periodic)
         GLib.timeout_add_seconds(3, self._ensure_daemon_once)
         self.start_file_monitor()
         self.start_console_monitor()
@@ -3037,6 +3044,19 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         threading.Thread(target=self._updates_thread, daemon=True).start()
         return GLib.SOURCE_REMOVE
 
+    def _check_updates_periodic(self) -> bool:
+        """Reverificação de rotina (a cada core.UPDATE_RECHECK_SECONDS).
+
+        É ela que garante o pedido do usuário: a atualização é recebida e
+        aplicada sozinha, mesmo em sessões longas, sem diálogo nem clique.
+        """
+        if not self.config.get("check_updates", True):
+            return GLib.SOURCE_REMOVE
+        if self._update_applying:
+            return GLib.SOURCE_CONTINUE  # já aplicando; o próximo ciclo decide
+        threading.Thread(target=self._updates_thread, daemon=True).start()
+        return GLib.SOURCE_CONTINUE
+
     def _ensure_daemon_once(self) -> bool:
         """Garante o daemon (piloto sem janela) após a abertura.
 
@@ -3067,13 +3087,16 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
     def _updates_thread(self) -> None:
         result = core.check_for_updates()
-        GLib.idle_add(self._announce_update, result)
+        # verificação de rotina (sem pedido do usuário) é automática: aplica
+        # sozinha em vez de mostrar diálogo; a manual continua sob demanda
+        GLib.idle_add(self._announce_update, result, not self._update_requested)
 
-    def _announce_update(self, result: dict) -> bool:
+    def _announce_update(self, result: dict, auto: bool = False) -> bool:
         status = result.get("status")
         if status == "current":
             if self._update_requested:
                 self.toast(f"Você já está na versão mais recente (v{core.APP_VERSION}).")
+            self._update_requested = False
             return GLib.SOURCE_REMOVE
         if status != "available":
             if self._update_requested:
@@ -3081,6 +3104,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                     "Não foi possível verificar atualizações "
                     "(GitHub inacessível ou limite de requisições).", 8,
                 )
+            self._update_requested = False
             return GLib.SOURCE_REMOVE
         remote = str(result.get("remote") or "")[:7] or "main"
         release = result.get("release") or {
@@ -3095,6 +3119,11 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         )
         if hasattr(self, "update_apply_button"):
             self.update_apply_button.set_visible(True)
+        self._update_requested = False
+        if auto:
+            # sem diálogo e sem clique: aplica e reinicia sozinho
+            self._start_update_apply(auto=True)
+            return GLib.SOURCE_REMOVE
         self.toast(f"Atualização disponível: {remote}", 8)
         self.show_update_dialog(release)
         return GLib.SOURCE_REMOVE
@@ -3130,7 +3159,9 @@ class MultiLUTWindow(Adw.ApplicationWindow):
     def on_update_apply_clicked(self, _button) -> None:
         self._start_update_apply()
 
-    def _start_update_apply(self) -> None:
+    def _start_update_apply(self, auto: bool = False) -> None:
+        self._update_applying = True
+        self._auto_update_flow = auto
         if hasattr(self, "update_apply_button"):
             self.update_apply_button.set_sensitive(False)
         self.toast("Atualizando do repositório…")
@@ -3141,6 +3172,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         GLib.idle_add(self._update_apply_done, result)
 
     def _update_apply_done(self, result: dict) -> bool:
+        self._update_applying = False
         if hasattr(self, "update_apply_button"):
             self.update_apply_button.set_sensitive(True)
         if not result.get("ok"):
@@ -3152,6 +3184,16 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         self.update_label.set_label(
             f"MultiLUT Controller v{core.APP_VERSION} — atualizado ({result['new_head']})"
         )
+        # o daemon em serviço segue no código antigo até religar: melhor
+        # esforço em thread, sem bloquear a UI nem depender do restart daqui
+        threading.Thread(
+            target=extra.daemon_systemctl, args=("restart",), daemon=True
+        ).start()
+        if self._auto_update_flow:
+            self._auto_update_flow = False
+            self.toast("Atualização aplicada; reiniciando o aplicativo…", 5)
+            self.restart_application()
+            return GLib.SOURCE_REMOVE
         self._confirm_restart()
         return GLib.SOURCE_REMOVE
 
@@ -3175,10 +3217,17 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self.restart_application()
 
     def restart_application(self) -> None:
-        """Relança o aplicativo com os mesmos argumentos e encerra este processo."""
+        """Relança o aplicativo com os mesmos argumentos e encerra este processo.
+
+        Com a janela oculta (modo bandeja) o relançamento entra com
+        --minimized: o app volta pronto e armado sem abrir janela na frente
+        do usuário durante a autoatualização.
+        """
         try:
             script = Path(sys.argv[0]).resolve()
             argv = [sys.executable, str(script), *sys.argv[1:]]
+            if not self.is_visible() and "--minimized" not in argv:
+                argv.append("--minimized")
             subprocess.Popen(argv, start_new_session=True)
         except OSError:
             self.toast("Não foi possível reiniciar; abra o aplicativo manualmente.", 6)
@@ -3500,8 +3549,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             try:
                 active = core.read_active_profile(self.shader_path)
             except core.MultiLUTError:
+                self._last_seen_active = None
                 self._update_active_markers(None)
                 return
+            self._last_seen_active = active
             self._update_active_markers(active)
             if (
                 self._shader_was_valid
@@ -3513,7 +3564,10 @@ class MultiLUTWindow(Adw.ApplicationWindow):
                     f"Perfil alterado externamente: {external.id:02d} — {external.name}",
                     5,
                 )
-                self._notify_profile_change(external, "external")
+                if not self._daemon_pilot_active:
+                    # com o daemon ativo, a notificação dele já cobre a troca;
+                    # repetir aqui geraria duas notificações por mapa
+                    self._notify_profile_change(external, "external")
             self.status_icon.set_from_icon_name("emblem-ok-symbolic")
             self.status_label.set_label(f"Ativo: {active:02d} — {core.PROFILE_BY_ID[active].name}")
             if select_active:
@@ -3527,11 +3581,36 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             self._shader_was_valid = False
             self._update_active_markers(None)
 
+    def sync_active_profile(self) -> bool:
+        """Relê o perfil ativo do shader e reaponta a exibição quando mudou.
+
+        O daemon aplica perfis por fora da janela e a gravação é por renome
+        atômica (evento que o monitor de arquivo do shader não garante); sem
+        este tique, o rótulo “Ativo” e os marcadores ficavam presos no
+        último perfil aplicado pela própria janela. Roda no tique de 2 s,
+        mesmo com a janela oculta, e atualiza o menu da bandeja (que segue
+        viva com a janela fechada) para refletir quem está no comando.
+        """
+        if not self.shader_valid:
+            return False
+        try:
+            active = core.read_active_profile(self.shader_path)
+        except core.MultiLUTError:
+            return False
+        if active == self._last_seen_active:
+            return False
+        self.refresh_shader_status(True)  # reaponta rótulo, marcadores e seleção
+        application = self.get_application()
+        if application is not None and hasattr(application, "_refresh_tray"):
+            application._refresh_tray(self)  # perfis recentes da bandeja
+        return True
+
     def refresh_game_status(self) -> bool:
         running = core.is_game_running()
         was_running = self._game_was_running
         self._game_was_running = running
         self._ensure_console_monitor()
+        self.sync_active_profile()
         if was_running is not None and running and not was_running:
             self._on_game_started()
         if running:
