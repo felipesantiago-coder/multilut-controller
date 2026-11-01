@@ -1421,7 +1421,9 @@ def build_diagnostic_text(
     histórico recente e (opcional) o final do console.log do jogo.
     """
     lines: list[str] = []
-    lines.append(f"MultiLUT Controller v{core.APP_VERSION} — relatório de diagnóstico")
+    lines.append(
+        f"MultiLUT Controller {core.display_version()} — relatório de diagnóstico"
+    )
     lines.append(f"Gerado em {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("")
     lines.append("== Ambiente ==")
@@ -1433,6 +1435,16 @@ def build_diagnostic_text(
     lines.append(f"Sessão: {desktop} ({session_type})")
     head = core.local_git_head()
     lines.append(f"Instalação: {'git ' + head if head else 'sem git (cópia)'}")
+    last = core.last_check_record()
+    if last is not None:
+        when = str(last.get("when") or "?")
+        status = str(last.get("status") or "?")
+        message = str(last.get("message") or "sem detalhe")
+        lines.append(
+            f"Última verificação de atualização: {when} — {status} ({message})"
+        )
+    else:
+        lines.append("Última verificação de atualização: sem registro ainda")
     daemon = query_daemon()
     if daemon is not None:
         lines.append(

@@ -76,6 +76,7 @@ class CheckForUpdatesTests(unittest.TestCase):
     def setUp(self):
         patchers = [
             mock.patch.object(core, "fetch_latest_release", return_value=None),
+            mock.patch.object(core, "record_last_check"),
         ]
         for patcher in patchers:
             patcher.start()
@@ -101,11 +102,13 @@ class CheckForUpdatesTests(unittest.TestCase):
         self.assertIn("def5678", result["message"])
 
     def test_release_nova_vence(self):
+        # release só é consultada em instalações sem git; ali ela vence
         release = {"tag": "v9.0.0", "name": "Grande", "url": "u"}
         with mock.patch.object(core, "installed_commit", return_value="abc1234"), \
-             mock.patch.object(core, "local_git_head", return_value="abc1234"), \
+             mock.patch.object(core, "local_git_head", return_value=None), \
+             mock.patch.object(core, "fetch_latest_commit", return_value=None), \
              mock.patch.object(
-                 core, "git_remote_head", return_value="abc1234abcdef5678"
+                 core, "fetch_remote_app_version", return_value=None
              ), \
              mock.patch.object(core, "fetch_latest_release", return_value=release):
             result = core.check_for_updates()

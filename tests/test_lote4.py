@@ -221,8 +221,9 @@ class DiagnosticReportTests(Lote4TestCase):
     def test_texto_do_relatorio(self):
         self.write_shader()
         text = extra.build_diagnostic_text(include_log_tail=False)
-        self.assertIn(f"MultiLUT Controller v{core.APP_VERSION}", text)
+        self.assertIn(f"MultiLUT Controller {core.APP_VERSION}", text)
         self.assertIn("== Ambiente ==", text)
+        self.assertIn("Última verificação de atualização:", text)
         self.assertIn("== Diagnóstico ==", text)
         self.assertIn("Shader MultiLUT", text)
         self.assertIn("== Histórico (últimos 20) ==", text)

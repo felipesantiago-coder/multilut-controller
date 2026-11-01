@@ -1875,7 +1875,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         about = Adw.AboutWindow(transient_for=self)
         about.set_application_name("MultiLUT Controller")
         about.set_application_icon("com.felipesantiago.MultiLUTController")
-        about.set_version(core.APP_VERSION)
+        about.set_version(core.display_version())
         about.set_developer_name("Felipe Santiago")
         about.set_website(core.RELEASES_API_URL.replace("/releases/latest", ""))
         about.set_comments(
@@ -2725,7 +2725,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
 
         update_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self.update_label = Gtk.Label(
-            label=f"MultiLUT Controller v{core.APP_VERSION}", xalign=0
+            label=f"MultiLUT Controller {core.display_version()}", xalign=0
         )
         self.update_label.set_hexpand(True)
         self.update_apply_button = Gtk.Button(label="Atualizar agora")
@@ -3103,7 +3103,9 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             return GLib.SOURCE_REMOVE
         if status == "current":
             if self._update_requested:
-                self.toast(f"Você já está na versão mais recente (v{core.APP_VERSION}).")
+                self.toast(
+                    f"Você já está na versão mais recente ({core.display_version()})."
+                )
             self._update_requested = False
             return GLib.SOURCE_REMOVE
         if status != "available":
@@ -3121,7 +3123,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
             "url": core.REPO_URL,
         }
         self._pending_release = release
-        local_note = str(result.get("local") or f"v{core.APP_VERSION}")
+        local_note = core.display_version()
         self.update_label.set_label(
             f"MultiLUT Controller ({local_note}) — {remote} disponível"
         )
@@ -3144,7 +3146,7 @@ class MultiLUTWindow(Adw.ApplicationWindow):
         notes = str(release.get("name") or "").strip()
         tag = str(release.get("tag") or "main")
         body = (
-            f"Versão instalada: v{core.APP_VERSION}.\n"
+            f"Versão instalada: {core.display_version()}.\n"
             + (f"{notes}\n\n" if notes and notes != tag else "\n")
             + "Em clones git o app faz pull; nas demais instalações baixa o "
             + "código novo do repositório e reinstala sozinho."

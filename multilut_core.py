@@ -22,7 +22,7 @@ from typing import Iterable
 
 
 APP_ID = "com.felipesantiago.MultiLUTController"
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 REPO_OWNER = "felipesantiago-coder"
 REPO_NAME = "multilut-controller"
 REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
@@ -743,19 +743,78 @@ def reset_process_generation_cache() -> None:
     _PROCESS_GENERATION = None
 
 
+def display_version(repo: Path | None = None) -> str:
+    """Versão para o usuário ver: base + commit instalado.
+
+    "1.9.1 (5420ca5)" quando o commit de origem é conhecido; só "1.9.1"
+    em instalação sem identificação. O sufixo muda a cada atualização
+    aplicada — prova visível de que o código é fresco, mesmo que a versão
+    base esqueça de subir em alguma correção futura.
+    """
+    commit = installed_commit(repo)
+    if commit:
+        return f"{APP_VERSION} ({commit[:7]})"
+    return APP_VERSION
+
+
+LAST_CHECK_FILE = "update_last_check.json"
+
+
+def last_check_path() -> Path:
+    """Registro da última verificação de atualizações (estado do app)."""
+    return app_state_dir() / LAST_CHECK_FILE
+
+
+def record_last_check(result: dict) -> None:
+    """Guarda em disco o resultado da última verificação (melhor esforço).
+
+    Diagnóstico: deixa registrado quando o verificador rodou pela última
+    vez e o que ele decidiu — o usuário passa a poder confirmar que a
+    verificação está viva. Falha de disco nunca derruba a verificação.
+    """
+    record = {
+        "when": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "status": str(result.get("status") or ""),
+        "local": result.get("local"),
+        "remote": result.get("remote"),
+        "message": str(result.get("message") or ""),
+    }
+    try:
+        path = last_check_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(record, ensure_ascii=False), encoding="utf-8"
+        )
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def last_check_record() -> dict | None:
+    """Lê o registro da última verificação; None quando não há registro."""
+    try:
+        data = json.loads(last_check_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def check_for_updates(repo: Path | None = None, timeout: float = 6.0) -> dict:
     """Decide se há versão nova no repositório, com ou sem release publicada.
 
     Ordem de verificação (a primeira resposta vence):
-      1. Release publicada com tag mais nova que APP_VERSION;
+      1. Release publicada com tag mais nova que APP_VERSION (apenas para
+         instalações sem git — em clone git este repositório não publica
+         releases e a comparação de commits via ls-remote é a verdade,
+         sem gastar limite de API);
       2. Commit do main diferente do commit instalado (git clone via
          ls-remote sem limite de API; demais instalações via API de commits
          ou marker source_commit);
       3. Sinal alternativo sem API: APP_VERSION do main publicado em
          raw.githubusercontent comparado com a versão local.
 
-    Retorna {"status": "available"|"current"|"unknown", "local", "remote",
-    "release", "message", "commit_message"}.
+    Todo resultado é registrado no estado do app (`record_last_check`) para
+    diagnóstico. Retorna {"status": "available"|"current"|"unknown",
+    "local", "remote", "release", "message", "commit_message"}.
     """
     result = {
         "status": "unknown",
@@ -775,19 +834,22 @@ def check_for_updates(repo: Path | None = None, timeout: float = 6.0) -> dict:
     result["local"] = local
     remote: str | None
     if local_git_head(repo or app_repo_dir()) is not None:
-        # Clone git: ls-remote não sofre limite de requisições da API.
+        # Clone git: ls-remote não sofre limite de requisições da API e
+        # este repositório não publica releases — a comparação de commits
+        # é a verdade; nenhuma chamada de API é necessária.
         remote = git_remote_head(repo)
         remote_commit = None
+        release = None
     else:
         remote_commit = fetch_latest_commit(timeout=timeout)
         remote = remote_commit["sha"] if remote_commit else None
+        release = fetch_latest_release(timeout=timeout)
     result["remote"] = remote
-
-    release = fetch_latest_release(timeout=timeout)
     result["release"] = release
     if release is not None and compare_versions(release["tag"], APP_VERSION):
         result["status"] = "available"
         result["message"] = f"Release {release['tag']} disponível."
+        record_last_check(result)
         return result
 
     if local and remote:
@@ -799,6 +861,7 @@ def check_for_updates(repo: Path | None = None, timeout: float = 6.0) -> dict:
             result["message"] = f"Commits novos no main ({remote[:7]})."
             if remote_commit:
                 result["commit_message"] = remote_commit.get("message", "")
+        record_last_check(result)
         return result
 
     # Sem comparação de commit possível (instalação sem marker, ou API de
@@ -808,10 +871,12 @@ def check_for_updates(repo: Path | None = None, timeout: float = 6.0) -> dict:
     if remote_version is not None and compare_versions(remote_version, APP_VERSION):
         result["status"] = "available"
         result["message"] = f"Versão {remote_version} disponível no repositório."
+        record_last_check(result)
         return result
     if remote_version is not None and not local:
         result["status"] = "current"
         result["message"] = "Você já está na versão mais recente."
+    record_last_check(result)
     return result
 
 

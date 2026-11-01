@@ -298,8 +298,8 @@ def cmd_update(args: argparse.Namespace) -> int:
     """Verifica ou aplica a atualização (git ou instalação por install.sh)."""
     if args.acao == "check":
         result = core.check_for_updates()
-        local = result.get("local") or "sem git e sem marcação"
-        print(f"versão instalada: v{core.APP_VERSION} ({local})")
+        extra_note = "" if result.get("local") else " (sem git e sem marcação)"
+        print(f"versão instalada: {core.display_version()}{extra_note}")
         print(result["message"])
         if result["status"] == "available":
             print("Aplique com multilut-ctl update apply.")
